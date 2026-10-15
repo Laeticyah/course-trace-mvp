@@ -6,6 +6,7 @@ const { execFile } = require("node:child_process");
 const { promisify } = require("node:util");
 const multer = require("multer");
 const pdfParse = require("pdf-parse");
+const canvas = require("./canvas");
 const {
   readData, writeData, createSession, findUserByCredentials,
   findUserByToken, deleteSession, reviewMaterial, getMembership,
@@ -62,6 +63,7 @@ function normalizeMaterial(input){
     fileHash: input.fileHash || null,
     fileName: input.fileName || null,
     fileSize: input.fileSize || null,
+    filePath: input.filePath || null,
     versionChainId: input.versionChainId || crypto.randomUUID(),
     authorityScore: 0,
     authorityBreakdown: null,
@@ -438,6 +440,137 @@ app.post("/api/materials/upload", requireAuth, requireRole("teacher", "admin"), 
   } catch(error) {
     if(req.file) await fs.rm(req.file.path, { force: true }).catch(() => {});
     next(error);
+  }
+});
+
+/** 判重：检查采集的条目是否与库中已有资料重复（按名称+来源） */
+function findExistingMaterial(course, name, source) {
+  return course.materials.find(
+    (m) => m.name === name && (m.source === source || m.source === "Canvas")
+  );
+}
+
+/**
+ * POST /api/courses/:courseId/sync
+ * 从 Canvas（真实 API 或模拟模式）采集课程资料并入库。
+ * 仅教师 / 管理员可触发。
+ */
+app.post("/api/courses/:courseId/sync", requireAuth, requireRole("teacher", "admin"), async (req, res, next) => {
+  try {
+    const { courseId } = req.params;
+    const data = readData();
+    let course = data.courses.find((item) => item.id === courseId);
+
+    // 系统内没有这门课时：尝试从 Canvas 拉课程信息自动建课（仅真实模式可拉取）
+    if (!course && canvas.hasToken() && !canvas.MOCK_MODE) {
+      const { found, course: remote } = await canvas.getCourseInfo(courseId);
+      if (found) {
+        course = {
+          id: remote.id,
+          code: remote.code,
+          name: remote.name,
+          desc: remote.desc,
+          color: "blue",
+          count: 0,
+          progress: 0,
+          official: 0,            // 关键修复：official 映射到官方计数列，NOT NULL 必须给默认值
+          updates: "刚刚创建",
+          materials: [],
+        };
+        // 关键修复：新建的课程必须加入 data.courses，才能随 writeData 持久化
+        data.courses.push(course);
+      }
+    }
+    if (!course) return res.status(404).json({ error: "COURSE_NOT_FOUND", message: "课程不存在，且无法从 Canvas 拉取到课程信息以便自动创建" });
+
+    // 1) 采集（真实 API 或 mock 降级；兼容返回对象/数组两种结构）
+    const raw = await canvas.collectCourseFiles(courseId);
+    const entries = Array.isArray(raw) ? raw : (raw.items || raw.entries || []);
+
+    // 2) 逐条入库：判重 → 版本识别 → 生成提醒
+    const added = [];
+    const updated = [];
+    const skipped = [];
+    const now = new Date().toISOString().slice(0, 10).replaceAll("-", ".");
+
+    // 2.1) 下载渠道文件到本地 uploads/<courseId>/，把本地路径写入条目 filePath
+    const savedDir = path.join(__dirname, "uploads", String(courseId));
+    let downloaded = [];
+    try {
+      downloaded = await canvas.downloadCourseFiles(courseId, savedDir);
+    } catch (e) {
+      // 下载失败不阻断入库，仅记录
+      console.error("下载渠道文件失败:", e.message);
+    }
+    const byFileName = new Map(downloaded.map((d) => [d.fileName, d]));
+
+    for (const entry of entries) {
+      const dl = byFileName.get(entry.fileName);
+      if (dl) {
+        entry.filePath = dl.localPath;
+        entry.fileHash = dl.hash || entry.fileHash;
+        entry.fileSize = dl.fileSize ?? entry.fileSize;
+      }
+      const existing = findExistingMaterial(course, entry.name, entry.source);
+      if (existing) {
+        if (existing.version !== entry.version) {
+          existing.version = entry.version;
+          existing.date = entry.date || existing.date;
+          existing.fileHash = entry.fileHash || existing.fileHash;
+          existing.fileName = entry.fileName || existing.fileName;
+          existing.fileSize = entry.fileSize ?? existing.fileSize;
+          updated.push(entry);
+        } else {
+          skipped.push(entry);
+        }
+        continue;
+      }
+      const material = normalizeMaterial({
+        name: entry.name,
+        type: entry.type || "课件",
+        source: entry.source || "Canvas",
+        version: entry.version || "V1.0",
+        date: entry.date || now,
+        fileHash: entry.fileHash || null,
+        fileName: entry.fileName || null,
+        fileSize: entry.fileSize ?? null,
+        filePath: entry.filePath || null,
+        versionChainId: crypto.randomUUID(),
+      });
+      // 若有可比较的文本，尝试版本识别（与上传接口逻辑对齐）
+      if (entry.text) {
+        material.extractedText = { text: entry.text, structure: { headings: 0, characters: entry.text.length, words: entry.text.split(/\s+/).length } };
+      }
+      course.materials.unshift(material);
+      course.count += 1;
+      course.updates = "刚刚更新";
+      if (material.status === "official") course.official += 1;
+      added.push(material);
+    }
+
+    // 3) 若没有任何新增/更新，不写库
+    if (added.length + updated.length > 0) {
+      applyAuthority(data.courses);
+      data.alerts.unshift({
+        title: `已从 Canvas 同步 ${course.name}`,
+        desc: `新增 ${added.length} 份资料${updated.length ? `，更新 ${updated.length} 份` : ""}${skipped.length ? `，跳过 ${skipped.length} 份重复` : ""}`,
+        time: "刚刚",
+        course: course.name,
+        unread: true
+      });
+      writeData(data);
+    }
+
+    res.json({
+      mode: canvas.hasToken() && !canvas.MOCK_MODE ? "live" : "mock",
+      course: course.id,
+      added: added.length,
+      updated: updated.length,
+      skipped: skipped.length,
+      items: added.map((m) => ({ id: m.id, name: m.name, type: m.type, version: m.version, status: m.status, source: m.source, date: m.date }))
+    });
+  } catch (err) {
+    next(err);
   }
 });
 

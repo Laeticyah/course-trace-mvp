@@ -4,3 +4,7 @@ course-trace.sqlite
 course-trace.sqlite-shm
 course-trace.sqlite-wal
 *.log
+
+# 敏感配置 — 绝不提交 Canvas Token
+.env
+*.local
