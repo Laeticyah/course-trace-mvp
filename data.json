@@ -1,0 +1,235 @@
+{
+  "courses": [
+    {
+      "id": "eng101",
+      "code": "ENG 101",
+      "name": "工程学导论",
+      "desc": "Engineering Fundamentals",
+      "color": "blue",
+      "count": 18,
+      "progress": 72,
+      "official": 4,
+      "updates": "今日更新",
+      "materials": [
+        {
+          "name": "第 3 章｜需求分析与问题定位",
+          "type": "课件",
+          "source": "Canvas",
+          "version": "V3.0",
+          "date": "2026.10.15",
+          "status": "official",
+          "statusText": "最新权威版",
+          "icon": "▤",
+          "authorityScore": 0.908,
+          "authorityBreakdown": {
+            "score": 0.908,
+            "source": 1,
+            "freshness": 0.993,
+            "change": 0.55
+          },
+          "isAuthoritative": true
+        },
+        {
+          "name": "项目建议书评分标准",
+          "type": "作业要求",
+          "source": "Canvas",
+          "version": "V2.1",
+          "date": "2026.10.12",
+          "status": "official",
+          "statusText": "最新权威版",
+          "icon": "▣",
+          "authorityScore": 0.879,
+          "authorityBreakdown": {
+            "score": 0.879,
+            "source": 1,
+            "freshness": 0.898,
+            "change": 0.55
+          },
+          "isAuthoritative": true
+        },
+        {
+          "name": "答辩重点与个人分工整理",
+          "type": "复习笔记",
+          "source": "班级群",
+          "version": "V1.0",
+          "date": "2026.10.08",
+          "status": "student",
+          "statusText": "学生整理",
+          "icon": "✎",
+          "authorityScore": 0.636,
+          "authorityBreakdown": {
+            "score": 0.636,
+            "source": 0.58,
+            "freshness": 0.786,
+            "change": 0.55
+          },
+          "isAuthoritative": true
+        }
+      ]
+    },
+    {
+      "id": "math101",
+      "code": "MATH 101",
+      "name": "高等数学 I",
+      "desc": "Advanced Mathematics",
+      "color": "orange",
+      "count": 24,
+      "progress": 54,
+      "official": 7,
+      "updates": "2 天前",
+      "materials": [
+        {
+          "name": "第 5 章｜定积分应用",
+          "type": "课件",
+          "source": "知途好课",
+          "version": "V2.0",
+          "date": "2026.10.13",
+          "status": "official",
+          "statusText": "最新权威版",
+          "icon": "▤",
+          "authorityScore": 0.849,
+          "authorityBreakdown": {
+            "score": 0.849,
+            "source": 0.92,
+            "freshness": 0.929,
+            "change": 0.55
+          },
+          "isAuthoritative": true
+        },
+        {
+          "name": "期中复习范围说明",
+          "type": "作业要求",
+          "source": "Canvas",
+          "version": "V1.0",
+          "date": "2026.10.01",
+          "status": "official",
+          "statusText": "最新权威版",
+          "icon": "▣",
+          "authorityScore": 0.797,
+          "authorityBreakdown": {
+            "score": 0.797,
+            "source": 1,
+            "freshness": 0.622,
+            "change": 0.55
+          },
+          "isAuthoritative": true
+        },
+        {
+          "name": "极限与连续性错题整理",
+          "type": "复习笔记",
+          "source": "网盘",
+          "version": "V1.2",
+          "date": "2026.09.28",
+          "status": "student",
+          "statusText": "学生整理",
+          "icon": "✎",
+          "authorityScore": 0.519,
+          "authorityBreakdown": {
+            "score": 0.519,
+            "source": 0.48,
+            "freshness": 0.563,
+            "change": 0.55
+          },
+          "isAuthoritative": true
+        }
+      ]
+    },
+    {
+      "id": "ai101",
+      "code": "AI 101",
+      "name": "人工智能导论",
+      "desc": "Introduction to AI",
+      "color": "green",
+      "count": 31,
+      "progress": 81,
+      "official": 9,
+      "updates": "5 天前",
+      "materials": [
+        {
+          "name": "第 2 章｜机器学习概览",
+          "type": "课件",
+          "source": "Canvas",
+          "version": "V4.0",
+          "date": "2026.10.10",
+          "status": "official",
+          "statusText": "最新权威版",
+          "icon": "▤",
+          "authorityScore": 0.862,
+          "authorityBreakdown": {
+            "score": 0.862,
+            "source": 1,
+            "freshness": 0.84,
+            "change": 0.55
+          },
+          "isAuthoritative": true
+        },
+        {
+          "name": "第一次编程作业要求",
+          "type": "作业要求",
+          "source": "Canvas",
+          "version": "V1.1",
+          "date": "2026.10.05",
+          "status": "official",
+          "statusText": "最新权威版",
+          "icon": "▣",
+          "authorityScore": 0.823,
+          "authorityBreakdown": {
+            "score": 0.823,
+            "source": 1,
+            "freshness": 0.711,
+            "change": 0.55
+          },
+          "isAuthoritative": true
+        },
+        {
+          "name": "Python 环境配置避坑指南",
+          "type": "复习笔记",
+          "source": "班级群",
+          "version": "V1.0",
+          "date": "2026.09.22",
+          "status": "student",
+          "statusText": "学生整理",
+          "icon": "✎",
+          "authorityScore": 0.538,
+          "authorityBreakdown": {
+            "score": 0.538,
+            "source": 0.58,
+            "freshness": 0.461,
+            "change": 0.55
+          },
+          "isAuthoritative": true
+        }
+      ]
+    }
+  ],
+  "alerts": [
+    {
+      "title": "工程学导论 · 第 3 章课件已更新",
+      "desc": "检测到内容变更：新增“需求优先级”小节。V3.0 已成为当前权威版本。",
+      "time": "今天 09:42",
+      "course": "工程学导论",
+      "unread": true
+    },
+    {
+      "title": "工程学导论 · 项目建议书评分标准",
+      "desc": "老师更新了提交格式说明，旧版本已自动归档。",
+      "time": "昨天 16:20",
+      "course": "工程学导论",
+      "unread": true
+    },
+    {
+      "title": "高等数学 I · 期中复习范围",
+      "desc": "已确认当前版本来自 Canvas，暂无内容变更。",
+      "time": "10 月 13 日",
+      "course": "高等数学 I",
+      "unread": true
+    },
+    {
+      "title": "人工智能导论 · 机器学习概览",
+      "desc": "版本 V4.0 已同步，新增 2 个示例。",
+      "time": "10 月 10 日",
+      "course": "人工智能导论",
+      "unread": false
+    }
+  ]
+}
