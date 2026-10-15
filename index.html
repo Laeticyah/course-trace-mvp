@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0c3b66" />
+    <title>课脉 · 课程资料治理与可信检索</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&family=Noto+Sans+SC:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark"><span></span><span></span><span></span></div>
+          <div>
+            <strong>课脉</strong>
+            <small>COURSE TRACE</small>
+          </div>
+        </div>
+        <div class="semester-chip"><span class="live-dot"></span> 2026 秋季学期</div>
+        <nav class="main-nav" aria-label="主导航">
+          <button class="nav-item active" data-view="overview"><span class="nav-icon">⌂</span>资料总览</button>
+          <button class="nav-item" data-view="courses"><span class="nav-icon">▦</span>我的课程</button>
+          <button class="nav-item" data-view="alerts"><span class="nav-icon">◉</span>变更提醒 <em>3</em></button>
+          <button class="nav-item" data-view="archive"><span class="nav-icon">↺</span>历史归档</button>
+        </nav>
+        <div class="sidebar-section">
+          <div class="section-label">我的课程 <button id="add-course" title="添加课程">＋</button></div>
+          <button class="course-shortcut selected" data-course="eng101"><span class="course-dot blue"></span><span>工程学导论</span><small>18</small></button>
+          <button class="course-shortcut" data-course="math101"><span class="course-dot orange"></span><span>高等数学 I</span><small>24</small></button>
+          <button class="course-shortcut" data-course="ai101"><span class="course-dot green"></span><span>人工智能导论</span><small>31</small></button>
+        </div>
+        <div class="sidebar-footer">
+          <div class="profile"><div class="avatar">林</div><div><strong>林同学</strong><small>本科生 · 2026级</small></div><span>•••</span></div>
+          <div class="storage"><div><span>资料库容量</span><strong>68%</strong></div><div class="progress"><span></span></div><small>已治理 73 / 108 份资料</small></div>
+        </div>
+      </aside>
+
+      <main class="main-content">
+        <header class="topbar">
+          <div class="breadcrumb"><span>我的空间</span><b>/</b><strong id="page-title">资料总览</strong></div>
+          <div class="top-actions">
+            <button class="icon-button" id="theme-toggle" title="切换主题">◐</button>
+            <button class="icon-button notification-button" id="open-alerts" title="查看提醒">♢<i></i></button>
+            <button class="top-avatar" id="account-button" title="登录">林</button>
+          </div>
+        </header>
+
+        <section id="overview-view" class="view active-view">
+          <div class="hero">
+            <div>
+              <div class="eyebrow"><span class="eyebrow-line"></span> STUDY MATERIALS / 01</div>
+              <h1>找到<strong>对的资料</strong>，<br />从今天开始。</h1>
+              <p>把分散在课程平台、群聊和网盘里的资料，整理成一条可信、可追溯的课程知识线。</p>
+            </div>
+            <div class="hero-illustration">
+              <div class="orbit orbit-one"></div><div class="orbit orbit-two"></div>
+              <div class="orbit-core"><span>✓</span><small>可信</small></div>
+              <div class="orbit-node node-a">Canvas</div><div class="orbit-node node-b">班级群</div><div class="orbit-node node-c">网盘</div>
+            </div>
+          </div>
+
+          <div class="search-panel">
+            <div class="search-heading"><div><span class="tiny-label">TRUSTED SEARCH</span><h2>查找课程资料</h2></div><span class="search-tip">默认优先展示最新权威版本</span></div>
+            <div class="search-box"><span>⌕</span><input id="global-search" type="search" placeholder="搜索课程、章节、资料名称或关键词…" /><kbd>⌘ K</kbd></div>
+            <div class="quick-filters"><button class="filter-chip active" data-filter="all">全部资料</button><button class="filter-chip" data-filter="official">官方资料</button><button class="filter-chip" data-filter="student">学生整理</button><button class="filter-chip" data-filter="recent">最近更新</button></div>
+          </div>
+
+          <div class="content-grid">
+            <section class="section-block course-section">
+              <div class="section-heading"><div><span class="tiny-label">COURSE LIBRARY</span><h2>课程资料库</h2></div><button class="text-button" data-view-target="courses">查看全部 <span>→</span></button></div>
+              <div id="course-cards" class="course-cards"></div>
+            </section>
+            <aside class="section-block alert-section">
+              <div class="section-heading"><div><span class="tiny-label">LATEST UPDATES</span><h2>需要你留意</h2></div><span class="count-badge">3</span></div>
+              <div id="alert-list" class="alert-list"></div>
+              <button class="outline-button full-width" data-view-target="alerts">查看全部提醒 <span>→</span></button>
+            </aside>
+          </div>
+        </section>
+
+        <section id="courses-view" class="view">
+          <div class="page-intro"><div><span class="tiny-label">COURSE LIBRARY</span><h1>我的课程</h1><p>按课程沉淀资料，保留每次更新的来路与版本。</p></div><button class="primary-button" id="add-material">＋ 添加资料</button></div>
+          <div class="course-workspace">
+            <div class="course-list-panel"><div class="panel-title">本学期课程 <span>3 门</span></div><div id="course-list"></div></div>
+            <div class="course-detail-panel" id="course-detail"></div>
+          </div>
+        </section>
+
+        <section id="alerts-view" class="view">
+          <div class="page-intro"><div><span class="tiny-label">CHANGELOG</span><h1>变更提醒</h1><p>官方资料有更新时，第一时间知道该看哪一版。</p></div><button class="outline-button" id="mark-read">全部标为已读</button></div>
+          <div class="alert-page-grid"><div class="alert-timeline" id="alert-timeline"></div><div class="reminder-card"><div class="reminder-icon">✦</div><h3>提醒策略</h3><p>刚性资料变更会主动提醒；学生整理类资料只在你主动检索时展示，减少无效打扰。</p><div class="reminder-row"><span>官方课件更新</span><b class="toggle on"></b></div><div class="reminder-row"><span>作业要求变更</span><b class="toggle on"></b></div><div class="reminder-row"><span>学生笔记更新</span><b class="toggle"></b></div></div></div>
+        </section>
+
+        <section id="archive-view" class="view">
+          <div class="page-intro"><div><span class="tiny-label">VERSION ARCHIVE</span><h1>历史归档</h1><p>所有被替代的版本都可回溯，资料不会随群消息消失。</p></div><div class="archive-stat"><strong>73</strong><span>份已治理资料</span></div></div>
+          <div class="archive-table"><div class="table-head"><span>资料名称</span><span>课程 / 章节</span><span>版本</span><span>状态</span><span>更新时间</span></div><div id="archive-rows"></div></div>
+        </section>
+
+        <footer class="app-footer"><span>课脉 · 课程资料版本治理与可信检索 MVP</span><span>数据仅用于演示 · 最后同步于 2026.10.15</span></footer>
+      </main>
+    </div>
+
+    <div class="modal-backdrop" id="material-modal" aria-hidden="true">
+      <div class="modal"><button class="modal-close" data-close-modal>×</button><span class="tiny-label">ADD MATERIAL</span><h2>登记一份新资料</h2><p>上传文件后，课脉会计算 SHA-256 内容指纹并检查重复版本。</p><form id="material-form"><label>资料名称<input name="name" required placeholder="例如：第三章 需求分析课件" /></label><div class="form-row"><label>所属课程<select name="course"><option value="eng101">工程学导论</option><option value="math101">高等数学 I</option><option value="ai101">人工智能导论</option></select></label><label>资料类型<select name="type"><option>课件</option><option>作业要求</option><option>复习笔记</option><option>答案整理</option></select></label></div><label>资料来源<select name="source"><option value="Canvas">Canvas（官方）</option><option value="知途好课">知途好课（官方）</option><option value="班级群">班级群（学生整理）</option><option value="网盘">网盘（学生整理）</option></select></label><label>资料文件<input name="file" type="file" accept=".pdf,.ppt,.pptx,.doc,.docx,.txt" /></label><button class="primary-button full-width" type="submit">加入资料库 <span>→</span></button></form></div>
+    </div>
+    <div class="modal-backdrop" id="login-modal" aria-hidden="true">
+      <div class="modal"><button class="modal-close" data-close-login>×</button><span class="tiny-label">ACCOUNT ACCESS</span><h2>登录课脉</h2><p>教师或管理员账号才能上传资料和管理版本。</p><form id="login-form"><label>用户名<input name="username" required value="teacher" /></label><label>密码<input name="password" type="password" required value="teacher123" /></label><button class="primary-button full-width" type="submit">登录 <span>→</span></button></form><div class="demo-accounts">演示账号：student / student123 · teacher / teacher123 · admin / admin123</div></div>
+    </div>
+    <div class="toast" id="toast"><span>✓</span><p></p></div>
+    <script src="app.js"></script>
+  </body>
+</html>

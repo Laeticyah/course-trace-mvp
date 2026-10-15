@@ -1,0 +1,6 @@
+node_modules/
+uploads/
+course-trace.sqlite
+course-trace.sqlite-shm
+course-trace.sqlite-wal
+*.log
