@@ -54,7 +54,7 @@ function renderCourseList(){
 function renderCourseDetail(){
   const c = courses.find(x => x.id === selectedCourse) || courses[0];
   $("#course-detail").innerHTML = `<div class="detail-head"><div><span class="course-code">${c.code}</span><h2>${c.name}</h2><p>${c.desc} · 2026 秋季学期</p></div><div class="detail-metrics"><div class="metric"><strong>${c.count}</strong><small>资料总数</small></div><div class="metric"><strong>${c.official}</strong><small>官方资料</small></div></div></div>
-    <div class="material-group"><div class="group-head"><h3>最新权威资料</h3><span>默认按可信度排序</span></div>${c.materials.map(m => `<div class="material-row"><span class="material-icon">${m.icon}</span><div><strong>${m.name}</strong><small>${m.type} · ${m.source} · ${m.version} · ${m.date}${m.authorityScore ? ` · 权威度 ${Math.round(m.authorityScore*100)}%` : ""}${m.reviewStatus === "approved" ? " · 已审核" : ""}</small></div><span class="status-tag ${m.status}">${m.statusText}</span>${currentUser && ["teacher","admin"].includes(currentUser.role) ? `<button class="review-button" data-review-material="${m.id}" data-review-status="${m.reviewStatus === "approved" ? "pending" : "approved"}">${m.reviewStatus === "approved" ? "撤销审核" : "确认权威"}</button>` : ""}</div>`).join("")}</div>
+    <div class="material-group"><div class="group-head"><h3>最新权威资料</h3><span>默认按可信度排序</span></div>${c.materials.map(m => `<div class="material-row"><span class="material-icon">${m.icon}</span><div><strong>${m.name}</strong><small>${m.type} · ${m.source} · ${m.version} · ${m.date}${m.authorityScore ? ` · 权威度 ${Math.round(m.authorityScore*100)}%` : ""}${m.reviewStatus === "approved" ? " · 已审核" : ""}</small></div><span class="status-tag ${m.status}">${m.statusText}</span>${m.filePath ? `<a class="download-link" href="/api/courses/${c.id}/files/${encodeURIComponent(m.fileName || m.name)}" title="下载已采集到本地的资料文件">⬇ 下载</a>` : ""}${currentUser && ["teacher","admin"].includes(currentUser.role) ? `<button class="review-button" data-review-material="${m.id}" data-review-status="${m.reviewStatus === "approved" ? "pending" : "approved"}">${m.reviewStatus === "approved" ? "撤销审核" : "确认权威"}</button>` : ""}</div>`).join("")}</div>
     <div class="material-group"><div class="group-head"><h3>版本时间线</h3><span>可回溯 ${c.materials[0].name}</span></div><div class="timeline"><div class="timeline-item"><time>2026.10.15 · 当前</time><strong>${c.materials[0].version} ${c.materials[0].name}</strong><p>官方来源 · 内容指纹已确认变更 · 当前权威版</p></div><div class="timeline-item"><time>2026.10.08</time><strong>V2.0 ${c.materials[0].name}</strong><p>已被新版本替代 · 保留历史记录</p></div><div class="timeline-item old"><time>2026.09.21</time><strong>V1.0 ${c.materials[0].name}</strong><p>初始上传版本 · 已归档</p></div></div></div>`;
 }
 function renderArchive(){
@@ -114,10 +114,41 @@ $$("[data-close-modal]").forEach(b=>b.addEventListener("click",closeModal));
 $("#material-modal").addEventListener("click",e=>{if(e.target.id==="material-modal")closeModal();});
 $("#material-form").addEventListener("submit",async e=>{e.preventDefault();const formData=new FormData(e.target);const endpoint=formData.get("file")?.size?"/api/materials/upload":"/api/materials";const options={method:"POST",body:endpoint.endsWith("upload")?formData:JSON.stringify(Object.fromEntries(formData)),headers:authHeaders()};if(!endpoint.endsWith("upload"))options.headers=authHeaders({"Content-Type":"application/json"});try{const response=await fetch(endpoint,options);const result=await response.json();if(response.status===401||response.status===403){closeModal();openLogin();return;}if(!response.ok)throw new Error(result.message||`API ${response.status}`);await loadFromApi();closeModal();e.target.reset();showToast(result.duplicate?"检测到重复文件，未创建新版本":"资料已加入资料库，内容指纹已生成");}catch(error){showToast(error.message||"资料保存失败");console.error(error);}});
 $("#theme-toggle").addEventListener("click",()=>{document.body.classList.toggle("warm-mode");showToast("显示模式已切换");});
-function openLogin(){ $("#login-modal").classList.add("open"); $("#login-modal").setAttribute("aria-hidden","false"); }
-function closeLogin(){ $("#login-modal").classList.remove("open"); $("#login-modal").setAttribute("aria-hidden","true"); }
+function openLogin(){
+  // 未登录时锁定主界面，只显示登录层
+  document.body.classList.add("auth-lock");
+  $("#login-modal").classList.add("open");
+  $("#login-modal").setAttribute("aria-hidden","false");
+}
+function closeLogin(){
+  document.body.classList.remove("auth-lock");
+  $("#login-modal").classList.remove("open");
+  $("#login-modal").setAttribute("aria-hidden","true");
+}
 $("#account-button").addEventListener("click",()=> currentUser ? showToast(`${currentUser.displayName} · ${currentUser.role}`) : openLogin());
 $$("[data-close-login]").forEach(b=>b.addEventListener("click",closeLogin));
 $("#login-modal").addEventListener("click",e=>{if(e.target.id==="login-modal")closeLogin();});
-$("#login-form").addEventListener("submit",async e=>{e.preventDefault();const body=Object.fromEntries(new FormData(e.target));try{const response=await fetch("/api/auth/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});const result=await response.json();if(!response.ok)throw new Error(result.message);authToken=result.token;localStorage.setItem("courseTraceToken",authToken);currentUser=result.user;$("#account-button").textContent=currentUser.displayName.slice(0,1);$("#account-button").title=`${currentUser.displayName} · ${currentUser.role}`;closeLogin();showToast(`已登录：${currentUser.displayName}`);}catch(error){showToast(error.message||"登录失败");}});
-loadFromApi(); loadCurrentUser();
+$("#login-form").addEventListener("submit",async e=>{e.preventDefault();const body=Object.fromEntries(new FormData(e.target));try{const response=await fetch("/api/auth/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});const result=await response.json();if(!response.ok)throw new Error(result.message);authToken=result.token;localStorage.setItem("courseTraceToken",authToken);currentUser=result.user;$("#account-button").textContent=currentUser.displayName.slice(0,1);$("#account-button").title=`${currentUser.displayName} · ${currentUser.role}`;closeLogin();document.body.classList.add("authed");showToast(`已登录：${currentUser.displayName}`);await loadFromApi();await loadCurrentUser();}catch(error){showToast(error.message||"登录失败");}});
+
+async function boot(){
+  if(!authToken){
+    // 未登录：锁定主界面，只显示登录层；后台仍用内置示例数据渲染（离线可演示）
+    openLogin();
+    renderCourseCards(); renderAlerts(); renderCourseList(); renderArchive();
+  }else{
+    document.body.classList.add("authenticated");
+    await loadCurrentUser();
+    if(!currentUser){
+      openLogin();
+      return;
+    }
+    await loadFromApi();
+  }
+}
+
+// 未登录锁定样式：隐藏主界面，只显示登录弹窗
+const _authCss=document.createElement("style");
+_authCss.textContent="body.auth-lock .app-shell{display:none!important}body.auth-lock #login-modal{display:grid!important;z-index:50}";
+document.head.appendChild(_authCss);
+
+boot();

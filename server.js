@@ -246,10 +246,15 @@ app.post("/api/auth/logout", requireAuth, (req, res) => {
 });
 
 function canViewCourse(user, courseId) {
-  return !user || user.role === "admin" || Boolean(getMembership(courseId, user.id));
+  // 安全修复：移除匿名访问(原先 !user 直接放行)。
+  // 管理员和教师可查看全部课程资料；学生需加入该课程。
+  if (!user) return false;
+  if (user.role === "admin") return true;
+  if (user.role === "teacher") return true;
+  return Boolean(getMembership(courseId, user.id));
 }
 
-app.get("/api/dashboard", async (_req, res, next) => {
+app.get("/api/dashboard", requireAuth, async (_req, res, next) => {
   try {
     const user = currentUser(_req);
     const data = readData();
@@ -275,7 +280,7 @@ app.get("/api/courses", async (req, res, next) => {
   } catch(error) { next(error); }
 });
 
-app.get("/api/courses/:courseId/materials", async (req, res, next) => {
+app.get("/api/courses/:courseId/materials", requireAuth, async (req, res, next) => {
   try {
     const user = currentUser(req);
     if (!canViewCourse(user, req.params.courseId)) return res.status(403).json({ error: "COURSE_ACCESS_DENIED", message: "请先加入该课程" });
@@ -289,6 +294,42 @@ app.get("/api/courses/:courseId/materials", async (req, res, next) => {
 
 app.get("/api/me/courses", requireAuth, (req, res) => {
   res.json({ courses: listUserCourses(req.user.id) });
+});
+
+// 列出某个课程已下载到本地的文件
+app.get("/api/courses/:courseId/files", requireAuth, async (req, res, next) => {
+  try {
+    const { courseId } = req.params;
+    const dir = path.join(uploadDir, String(courseId));
+    let names = [];
+    try { names = await fs.readdir(dir); } catch (_) { names = []; }
+    res.json({ courseId, files: names });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// 下载本地 uploads/<courseId>/ 中已采集的资料文件
+app.get("/api/courses/:courseId/files/:fileName", requireAuth, async (req, res, next) => {
+  try {
+    const { courseId, fileName } = req.params;
+    const user = currentUser(req);
+    if (!canViewCourse(user, courseId)) return res.status(403).json({ error: "ACCESS_DENIED", message: "请先登录" });
+    const filePath = path.join(uploadDir, String(courseId), String(fileName));
+    // 防止路径穿越
+    if (!filePath.startsWith(path.join(uploadDir, String(courseId)))) {
+      return res.status(400).json({ error: "INVALID_PATH", message: "非法路径" });
+    }
+    const stat = await fs.stat(filePath);
+    if (!stat.isFile()) return res.status(404).json({ error: "FILE_NOT_FOUND", message: "本地文件不存在" });
+    res.download(filePath, fileName);
+  } catch (err) {
+    if (err.code === "ENOENT") {
+      res.status(404).json({ error: "FILE_NOT_FOUND", message: "本地文件不存在" });
+    } else {
+      next(err);
+    }
+  }
 });
 
 app.post("/api/courses/:courseId/join", requireAuth, requireRole("student"), (req, res) => {
@@ -513,7 +554,13 @@ app.post("/api/courses/:courseId/sync", requireAuth, requireRole("teacher", "adm
       }
       const existing = findExistingMaterial(course, entry.name, entry.source);
       if (existing) {
-        if (existing.version !== entry.version) {
+        // 已存在的资料：若本地有文件且之前未记录路径，补上文件路径
+        if (dl && !existing.filePath) {
+          existing.filePath = dl.localPath;
+          existing.fileHash = existing.fileHash || dl.hash;
+          existing.fileSize = existing.fileSize ?? dl.fileSize;
+          updated.push(entry);
+        } else if (existing.version !== entry.version) {
           existing.version = entry.version;
           existing.date = entry.date || existing.date;
           existing.fileHash = entry.fileHash || existing.fileHash;
