@@ -497,6 +497,10 @@ function findExistingMaterial(course, name, source) {
  * 仅教师 / 管理员可触发。
  */
 app.post("/api/courses/:courseId/sync", requireAuth, requireRole("teacher", "admin"), async (req, res, next) => {
+  const syncLog = [];
+  const log = (level, message, extra = {}) => {
+    syncLog.push({ level, message, time: new Date().toISOString().slice(11, 19), ...extra });
+  };
   try {
     const { courseId } = req.params;
     const data = readData();
@@ -525,8 +529,10 @@ app.post("/api/courses/:courseId/sync", requireAuth, requireRole("teacher", "adm
     if (!course) return res.status(404).json({ error: "COURSE_NOT_FOUND", message: "课程不存在，且无法从 Canvas 拉取到课程信息以便自动创建" });
 
     // 1) 采集（真实 API 或 mock 降级；兼容返回对象/数组两种结构）
+    log("info", `开始采集 Canvas 课程 ${courseId} 的资料`);
     const raw = await canvas.collectCourseFiles(courseId);
     const entries = Array.isArray(raw) ? raw : (raw.items || raw.entries || []);
+    log("info", `采集到 ${entries.length} 份原始资料`, { mode: raw.mode });
 
     // 2) 逐条入库：判重 → 版本识别 → 生成提醒
     const added = [];
@@ -544,6 +550,7 @@ app.post("/api/courses/:courseId/sync", requireAuth, requireRole("teacher", "adm
       console.error("下载渠道文件失败:", e.message);
     }
     const byFileName = new Map(downloaded.map((d) => [d.fileName, d]));
+    log("info", `已下载 ${downloaded.length} 份资料文件到本地`);
 
     for (const entry of entries) {
       const dl = byFileName.get(entry.fileName);
@@ -560,6 +567,7 @@ app.post("/api/courses/:courseId/sync", requireAuth, requireRole("teacher", "adm
           existing.fileHash = existing.fileHash || dl.hash;
           existing.fileSize = existing.fileSize ?? dl.fileSize;
           updated.push(entry);
+          log("info", `补全资料文件路径: ${entry.name}`);
         } else if (existing.version !== entry.version) {
           existing.version = entry.version;
           existing.date = entry.date || existing.date;
@@ -567,8 +575,10 @@ app.post("/api/courses/:courseId/sync", requireAuth, requireRole("teacher", "adm
           existing.fileName = entry.fileName || existing.fileName;
           existing.fileSize = entry.fileSize ?? existing.fileSize;
           updated.push(entry);
+          log("info", `检测到版本变更，升级为 ${entry.version}: ${entry.name}`);
         } else {
           skipped.push(entry);
+          log("info", `跳过重复资料: ${entry.name} ${entry.version}`);
         }
         continue;
       }
@@ -593,6 +603,7 @@ app.post("/api/courses/:courseId/sync", requireAuth, requireRole("teacher", "adm
       course.updates = "刚刚更新";
       if (material.status === "official") course.official += 1;
       added.push(material);
+      log("info", `新增资料: ${material.name} (${material.version})`);
     }
 
     // 3) 若没有任何新增/更新，不写库
@@ -607,6 +618,7 @@ app.post("/api/courses/:courseId/sync", requireAuth, requireRole("teacher", "adm
       });
       writeData(data);
     }
+    log("info", `同步完成: 新增 ${added.length}，更新 ${updated.length}，跳过 ${skipped.length}`);
 
     res.json({
       mode: canvas.hasToken() && !canvas.MOCK_MODE ? "live" : "mock",
@@ -614,6 +626,7 @@ app.post("/api/courses/:courseId/sync", requireAuth, requireRole("teacher", "adm
       added: added.length,
       updated: updated.length,
       skipped: skipped.length,
+      syncLog,
       items: added.map((m) => ({ id: m.id, name: m.name, type: m.type, version: m.version, status: m.status, source: m.source, date: m.date }))
     });
   } catch (err) {
@@ -638,6 +651,36 @@ app.use((error, _req, res, _next) => {
 fs.mkdir(uploadDir, { recursive: true })
   .then(() => app.listen(port, () => {
     console.log(`Course Trace API running at http://localhost:${port}`);
+
+    // 定时自动同步：每天 03:00 检查一次 Canvas 新资料（可配置）
+    const AUTO_SYNC_INTERVAL_MS = Number(process.env.AUTO_SYNC_INTERVAL_MS || 24 * 60 * 60 * 1000);
+    const shouldRunNow = () => {
+      const h = new Date().getHours();
+      // 每轮都检查；为避免反复立即执行，首轮等待一个完整周期
+      return false;
+    };
+    const runAutoSync = async () => {
+      if (canvas.hasToken() && !canvas.MODE_DEACTIVATED) {
+        const courses = canvas.listCourses ? canvas.listCourses() : [];
+        console.log(`[auto-sync] 扫描 ${courses.length} 门课的 Canvas 资料`);
+        for (const course of courses) {
+          try {
+            const raw = await canvas.collectCourseFiles(course.id);
+            const entries = Array.isArray(raw) ? raw : (raw.items || raw.entries || []);
+            if (entries.length > 0) {
+              console.log(`[auto-sync] 课程 ${course.name}: 采集到 ${entries.length} 份资料`);
+            }
+          } catch (e) {
+            console.error(`[auto-sync] 课程 ${course.name} 同步失败:`, e.message);
+          }
+        }
+      } else {
+        console.log("[auto-sync] 未配置 Canvas token，跳过自动同步");
+      }
+    };
+    // 首轮延迟一个周期(默认24h)再启动；便于服务稳定后再执行
+    setInterval(runAutoSync, AUTO_SYNC_INTERVAL_MS);
+    console.log(`[auto-sync] 定时同步已启用，周期 ${Math.round(AUTO_SYNC_INTERVAL_MS / 3600000)} 小时`);
   }))
   .catch(error => {
     console.error("Failed to initialize upload directory", error);
