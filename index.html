@@ -43,6 +43,7 @@
         <header class="topbar">
           <div class="breadcrumb"><span>我的空间</span><b>/</b><strong id="page-title">资料总览</strong></div>
           <div class="top-actions">
+            <button class="sync-button" id="sync-btn" title="从 Canvas 同步课程资料">⟳ 同步</button>
             <button class="icon-button" id="theme-toggle" title="切换主题">◐</button>
             <button class="icon-button notification-button" id="open-alerts" title="查看提醒">♢<i></i></button>
             <button class="top-avatar" id="account-button" title="登录">林</button>
@@ -109,6 +110,20 @@
     </div>
     <div class="modal-backdrop" id="login-modal" aria-hidden="true">
       <div class="modal"><button class="modal-close" data-close-login>×</button><span class="tiny-label">ACCOUNT ACCESS</span><h2>登录课脉</h2><p>教师或管理员账号才能上传资料和管理版本。</p><form id="login-form"><label>用户名<input name="username" required value="teacher" /></label><label>密码<input name="password" type="password" required value="teacher123" /></label><button class="primary-button full-width" type="submit">登录 <span>→</span></button></form><div class="demo-accounts">演示账号：student / student123 · teacher / teacher123 · admin / admin123</div></div>
+    </div>
+    <div class="modal-backdrop" id="sync-modal" aria-hidden="true">
+      <div class="modal modal-lg">
+        <button class="modal-close" data-close-modal>×</button>
+        <span class="tiny-label">SYNC LOG</span>
+        <h2>Canvas 同步</h2>
+        <p>采集最新课程资料，并执行版本识别与权威判定。</p>
+        <div class="sync-progress" id="sync-progress" hidden>
+          <div class="sync-progress-bar"><span id="sync-progress-fill"></span></div>
+          <p class="sync-status" id="sync-status">正在同步…</p>
+        </div>
+        <div class="sync-log" id="sync-log"></div>
+        <button class="primary-button full-width" id="sync-close" type="button">关闭</button>
+      </div>
     </div>
     <div class="toast" id="toast"><span>✓</span><p></p></div>
     <script src="app.js"></script>

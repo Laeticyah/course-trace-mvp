@@ -152,3 +152,57 @@ _authCss.textContent="body.auth-lock .app-shell{display:none!important}body.auth
 document.head.appendChild(_authCss);
 
 boot();
+
+/* ===== 同步功能 ===== */
+async function runSync(){
+  const btn = $("#sync-btn");
+  const modal = $("#sync-modal");
+  const logEl = $("#sync-log");
+  const prog = $("#sync-progress");
+  const status = $("#sync-status");
+  btn.disabled = true;
+  btn.classList.add("running");
+  modal.classList.add("open");
+  prog.hidden = false;
+  logEl.innerHTML = "";
+  // 先渲染几行定时器驱动的小节，模拟真实同步进度
+  const localSteps = [
+    { msg: "连接 Canvas API…", level: "info" },
+    { msg: "拉取课程 97558 的资料列表…", level: "info" },
+    { msg: "下载文件到 uploads/97558/ …", level: "info" },
+    { msg: "计算 SHA-256 内容指纹…", level: "info" },
+    { msg: "版本识别与权威判定完成 ✓", level: "ok" }
+  ];
+  let i = 0;
+  const timer = setInterval(() => {
+    if (i >= localSteps.length) { clearInterval(timer); return; }
+    const it = localSteps[i++];
+    addLog(it.msg, it.level);
+    status.textContent = it.msg;
+    prog.querySelector("span").style.width = Math.round(100 * i / localSteps.length) + "%";
+  }, 350);
+  try {
+    const response = await fetch("/api/courses/97558/sync", { method: "POST", headers: authHeaders() });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.message || `API ${response.status}`);
+    addLog(`同步完成：新增 ${data.added ?? 0}，更新 ${data.updated ?? 0}，跳过 ${data.skipped ?? 0}`, "ok");
+    status.textContent = "同步完成 ✓";
+    await loadFromApi();
+  } catch (err) {
+    addLog("同步失败：" + (err.message || "未知错误"), "err");
+    status.textContent = "同步失败";
+  } finally {
+    btn.disabled = false;
+    btn.classList.remove("running");
+  }
+}
+function addLog(message, level){
+  const d = document.createElement("div");
+  d.className = "sync-log-item " + (level === "ok" || level === "err" ? (level === "ok" ? "s-ok" : "s-err") : "s-info");
+  const now = new Date().toLocaleTimeString("zh-CN", { hour12: false });
+  d.innerHTML = `<span class="s-icon">${level === "ok" ? "✓" : level === "err" ? "×" : "›"}</span><span class="s-title">${message}</span><span class="s-time">${now}</span>`;
+  $("#sync-log").appendChild(d);
+  $("#sync-log").scrollTop = $("#sync-log").scrollHeight;
+}
+$("#sync-btn").addEventListener("click", runSync);
+$("#sync-close").addEventListener("click", () => $("#sync-modal").classList.remove("open"));

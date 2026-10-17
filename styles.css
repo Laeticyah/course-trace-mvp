@@ -4,3 +4,11 @@
 .top-avatar{border:0;cursor:pointer}
 .review-button{border:1px solid #c7d8e2;background:transparent;color:#55768c;border-radius:4px;padding:5px 7px;font-size:9px;cursor:pointer;white-space:nowrap}.review-button:hover{background:#edf6fb}
 .demo-accounts{font-size:10px;color:#8b9ba5;line-height:1.7;margin-top:15px}
+/* ===== 同步 UI ===== */
+.topbar .sync-button{display:inline-flex;align-items:center;gap:6px;background:var(--blue);color:#fff;border:1px solid var(--blue);border-radius:5px;padding:8px 14px;font:600 12px inherit;cursor:pointer;transition:.2s}.topbar .sync-button:hover{background:#1d639d}.topbar .sync-button:disabled{opacity:.6;cursor:not-allowed}.sync-button.running{animation:sync-pulse 1.6s infinite}@keyframes sync-pulse{0%,100%{opacity:1}50%{opacity:.55}}
+.modal-lg{width:min(560px,100%)}
+.sync-progress{margin:18px 0 4px}.sync-progress-bar{height:6px;background:#e6eef3;border-radius:3px;overflow:hidden}.sync-progress-fill{display:block;height:100%;width:0;background:var(--blue);border-radius:3px;transition:width .3s ease}
+.sync-status{font-size:11px;color:#6b8294;margin:9px 0 0}
+.sync-log{margin-top:16px;max-height:260px;overflow-y:auto;border:1px solid var(--blue);border-radius:6px;padding:12px 14px;background:#fafbfc;display:flex;flex-direction:column;gap:8px}.sync-log:empty::before{content:"暂无同步记录，点击「同步」开始";color:#a3b3be;font-size:11px}
+.sync-log-item{display:flex;gap:8px;align-items:flex-start;font-size:11px;color:#41566a;line-height:1.5}.sync-log-item .s-icon{flex:none;width:15px;text-align:center;font-weight:700}.sync-log-item.s-ok .s-icon{color:var(--green)}.sync-log-item.s-info .s-icon{color:var(--blue)}.sync-log-item.s-warn .s-icon{color:#d08a3a}.sync-log-item.s-err .s-icon{color:#d0493e}
+.sync-log-item .s-title{font-weight:600}.sync-log-item .s-desc{color:#8496a3}.sync-log-item .s-time{flex:none;margin-left:auto;color:#adb9c1;font:9px "DM Mono",monospace;align-self:center}
