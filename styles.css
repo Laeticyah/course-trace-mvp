@@ -12,3 +12,11 @@
 .sync-log{margin-top:16px;max-height:260px;overflow-y:auto;border:1px solid var(--blue);border-radius:6px;padding:12px 14px;background:#fafbfc;display:flex;flex-direction:column;gap:8px}.sync-log:empty::before{content:"暂无同步记录，点击「同步」开始";color:#a3b3be;font-size:11px}
 .sync-log-item{display:flex;gap:8px;align-items:flex-start;font-size:11px;color:#41566a;line-height:1.5}.sync-log-item .s-icon{flex:none;width:15px;text-align:center;font-weight:700}.sync-log-item.s-ok .s-icon{color:var(--green)}.sync-log-item.s-info .s-icon{color:var(--blue)}.sync-log-item.s-warn .s-icon{color:#d08a3a}.sync-log-item.s-err .s-icon{color:#d0493e}
 .sync-log-item .s-title{font-weight:600}.sync-log-item .s-desc{color:#8496a3}.sync-log-item .s-time{flex:none;margin-left:auto;color:#adb9c1;font:9px "DM Mono",monospace;align-self:center}
+
+/* ===== 醒目下载按钮 ===== */
+.download-link{display:inline-flex;align-items:center;gap:6px;background:#2e8b57;color:#fff;font-size:12px;font-weight:700;padding:8px 14px;border-radius:6px;text-decoration:none;box-shadow:0 2px 8px rgba(46,139,87,.28);transition:.2s;border:1px solid #247a49;cursor:pointer;white-space:nowrap}
+.download-link:hover{background:#247a49;transform:translateY(-1px);box-shadow:0 4px 14px rgba(46,139,87,.38)}
+.download-link:active{transform:translateY(0)}
+.download-link::before{content:"⇩";font-size:14px;line-height:1}
+.download-placeholder{font-size:11px;color:#b0bec9;padding:8px 0;white-space:nowrap}
+.material-row:hover .download-link{box-shadow:0 4px 14px rgba(46,139,87,.4)}

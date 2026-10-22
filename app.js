@@ -1,8 +1,8 @@
 let courses = [
   { id:"eng101", code:"ENG 101", name:"工程学导论", desc:"Engineering Fundamentals", color:"blue", count:18, progress:72, official:4, updates:"今日更新", materials:[
-    {name:"第 3 章｜需求分析与问题定位", type:"课件", source:"Canvas", version:"V3.0", date:"2026.10.15", status:"official", statusText:"最新权威版", icon:"▤"},
-    {name:"项目建议书评分标准", type:"作业要求", source:"Canvas", version:"V2.1", date:"2026.10.12", status:"official", statusText:"官方资料", icon:"▣"},
-    {name:"答辩重点与个人分工整理", type:"复习笔记", source:"班级群", version:"V1.0", date:"2026.10.08", status:"student", statusText:"学生整理", icon:"✎"}
+    {name:"第 3 章｜需求分析与问题定位", type:"课件", source:"Canvas", version:"V3.0", date:"2026.10.15", status:"official", statusText:"最新权威版", icon:"▤", filePath:"uploads/eng101/需求分析-第三章.pdf", fileName:"需求分析-第三章.pdf"},
+    {name:"项目建议书评分标准", type:"作业要求", source:"Canvas", version:"V2.1", date:"2026.10.12", status:"official", statusText:"官方资料", icon:"▣", filePath:"uploads/eng101/项目建议书评分标准.pdf", fileName:"项目建议书评分标准.pdf"},
+    {name:"答辩重点与个人分工整理", type:"复习笔记", source:"班级群", version:"V1.0", date:"2026.10.08", status:"student", statusText:"学生整理", icon:"✎", filePath:"uploads/eng101/答辩重点与个人分工整理.pdf", fileName:"答辩重点与个人分工整理.pdf"}
   ]},
   { id:"math101", code:"MATH 101", name:"高等数学 I", desc:"Advanced Mathematics", color:"orange", count:24, progress:54, official:7, updates:"2 天前", materials:[
     {name:"第 5 章｜定积分应用", type:"课件", source:"知途好课", version:"V2.0", date:"2026.10.13", status:"official", statusText:"最新权威版", icon:"▤"},
@@ -54,7 +54,7 @@ function renderCourseList(){
 function renderCourseDetail(){
   const c = courses.find(x => x.id === selectedCourse) || courses[0];
   $("#course-detail").innerHTML = `<div class="detail-head"><div><span class="course-code">${c.code}</span><h2>${c.name}</h2><p>${c.desc} · 2026 秋季学期</p></div><div class="detail-metrics"><div class="metric"><strong>${c.count}</strong><small>资料总数</small></div><div class="metric"><strong>${c.official}</strong><small>官方资料</small></div></div></div>
-    <div class="material-group"><div class="group-head"><h3>最新权威资料</h3><span>默认按可信度排序</span></div>${c.materials.map(m => `<div class="material-row"><span class="material-icon">${m.icon}</span><div><strong>${m.name}</strong><small>${m.type} · ${m.source} · ${m.version} · ${m.date}${m.authorityScore ? ` · 权威度 ${Math.round(m.authorityScore*100)}%` : ""}${m.reviewStatus === "approved" ? " · 已审核" : ""}</small></div><span class="status-tag ${m.status}">${m.statusText}</span>${m.filePath ? `<a class="download-link" href="/api/courses/${c.id}/files/${encodeURIComponent(m.fileName || m.name)}" title="下载已采集到本地的资料文件">⬇ 下载</a>` : ""}${currentUser && ["teacher","admin"].includes(currentUser.role) ? `<button class="review-button" data-review-material="${m.id}" data-review-status="${m.reviewStatus === "approved" ? "pending" : "approved"}">${m.reviewStatus === "approved" ? "撤销审核" : "确认权威"}</button>` : ""}</div>`).join("")}</div>
+    <div class="material-group"><div class="group-head"><h3>最新权威资料</h3><span>默认按可信度排序</span></div>${c.materials.map(m => `<div class="material-row"><span class="material-icon">${m.icon}</span><div><strong>${m.name}</strong><small>${m.type} · ${m.source} · ${m.version} · ${m.date}${m.authorityScore ? ` · 权威度 ${Math.round(m.authorityScore*100)}%` : ""}${m.reviewStatus === "approved" ? " · 已审核" : ""}</small></div><span class="status-tag ${m.status}">${m.statusText}</span>${m.filePath ? `<a class="download-link" href="/api/courses/${c.id}/files/${encodeURIComponent(m.fileName || m.name)}" title="下载已采集到本地的资料文件">⬇ 下载</a>` : `<span class="download-placeholder">未采集到文件</span>`}${currentUser && ["teacher","admin"].includes(currentUser.role) ? `<button class="review-button" data-review-material="${m.id}" data-review-status="${m.reviewStatus === "approved" ? "pending" : "approved"}">${m.reviewStatus === "approved" ? "撤销审核" : "确认权威"}</button>` : ""}</div>`).join("")}</div>
     <div class="material-group"><div class="group-head"><h3>版本时间线</h3><span>可回溯 ${c.materials[0].name}</span></div><div class="timeline"><div class="timeline-item"><time>2026.10.15 · 当前</time><strong>${c.materials[0].version} ${c.materials[0].name}</strong><p>官方来源 · 内容指纹已确认变更 · 当前权威版</p></div><div class="timeline-item"><time>2026.10.08</time><strong>V2.0 ${c.materials[0].name}</strong><p>已被新版本替代 · 保留历史记录</p></div><div class="timeline-item old"><time>2026.09.21</time><strong>V1.0 ${c.materials[0].name}</strong><p>初始上传版本 · 已归档</p></div></div></div>`;
 }
 function renderArchive(){
@@ -73,14 +73,19 @@ function openModal(){ $("#material-modal").classList.add("open"); $("#material-m
 function closeModal(){ $("#material-modal").classList.remove("open"); $("#material-modal").setAttribute("aria-hidden","true"); }
 async function loadFromApi(){
   try{
-    const response = await fetch("/api/dashboard");
+    const response = await fetch("/api/dashboard", {headers: authHeaders()});
     if(!response.ok) throw new Error(`API ${response.status}`);
     const data = await response.json();
-    courses = data.courses;
-    alerts = data.alerts;
+    courses = data.courses || [];
+    alerts = data.alerts || [];
     renderCourseCards(); renderAlerts(); renderCourseList(); renderArchive();
+    const err = document.getElementById("api-error");
+    if(err) err.hidden = true;
   }catch(error){
     console.warn("API unavailable; using demo data.", error);
+    // 明确提示用户当前为演示模式
+    showToast("⚠️ 服务请求失败，正在使用本地演示数据");
+    renderCourseCards(); renderAlerts(); renderCourseList(); renderArchive();
   }
 }
 
@@ -104,7 +109,41 @@ $$(".course-shortcut").forEach(b => b.addEventListener("click", () => { selected
 $("#course-list").addEventListener("click", e => { const item=e.target.closest("[data-select-course]"); if(item){selectedCourse=item.dataset.selectCourse; renderCourseList();} });
 $("#course-detail").addEventListener("click", async e => { const button=e.target.closest("[data-review-material]"); if(!button) return; const status=button.dataset.reviewStatus; const note=status==="approved"?"教师确认该资料为当前权威版本":"撤销人工审核，恢复算法推荐"; const response=await fetch(`/api/materials/${button.dataset.reviewMaterial}/review`,{method:"PUT",headers:authHeaders({"Content-Type":"application/json"}),body:JSON.stringify({status,note})}); const result=await response.json(); if(!response.ok){showToast(result.message||"审核操作失败");return;} await loadFromApi(); showToast(status==="approved"?"已确认权威版本":"已撤销人工审核"); });
 $("#course-cards").addEventListener("click", e => { const card=e.target.closest("[data-course-card]"); if(card){selectedCourse=card.dataset.courseCard; renderCourseList(); switchView("courses");} });
-$("#global-search").addEventListener("input", e => {searchTerm=e.target.value; renderCourseCards();});
+$("#global-search").addEventListener("input", e => {
+  const q = e.target.value.trim();
+  const debounce = window.__searchTimer;
+  clearTimeout(debounce);
+  window.__searchTimer = setTimeout(async () => {
+    searchTerm = q;
+    if (q.length >= 2) {
+      // 调用后端 FTS5 搜索 API
+      try {
+        const resp = await fetch(`/api/search?q=${encodeURIComponent(q)}&limit=20`, {headers: authHeaders()});
+        if (resp.ok) {
+          const data = await resp.json();
+          renderSearchResults(data.results || []);
+          return;
+        }
+      } catch(err) { console.warn("[search] API error:", err.message); }
+    }
+    // 回退到本地过滤
+    renderCourseCards();
+  }, 300);
+});
+function renderSearchResults(results){
+  const container = $("#course-cards");
+  if (!container) return;
+  if (!results.length) {
+    container.innerHTML = `<div class="empty-state">没有找到与“${searchTerm}”匹配的课程资料</div>`;
+    return;
+  }
+  container.innerHTML = results.map(r => `<article class="course-card ${r.color||"blue"}-card">
+    <div class="card-top"><span class="course-code">${r.courseCode || ""}</span><span class="card-flag">${r.version || ""}</span></div>
+    <h3>${r.name}</h3>
+    <p>${r.courseName || ""} · ${r.type || ""} · ${r.source || ""}</p>
+    <small>权威度 ${r.authorityScore ? Math.round(r.authorityScore * 100) + "%" : "—"}</small>
+  </article>`).join("");
+}
 document.addEventListener("keydown", e => {if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==="k"){e.preventDefault();$("#global-search").focus();}});
 $$(".filter-chip").forEach(b => b.addEventListener("click", () => { $$(".filter-chip").forEach(x=>x.classList.remove("active")); b.classList.add("active"); activeFilter=b.dataset.filter; showToast(activeFilter==="recent"?"已切换到最近更新":"已切换到"+b.textContent); }));
 $("#open-alerts").addEventListener("click",()=>switchView("alerts"));

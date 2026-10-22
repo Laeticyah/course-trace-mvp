@@ -49,6 +49,18 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_materials_course ON materials(course_id);
   CREATE INDEX IF NOT EXISTS idx_materials_hash ON materials(file_hash);
   CREATE INDEX IF NOT EXISTS idx_materials_chain ON materials(version_chain_id);
+  CREATE TABLE IF NOT EXISTS material_versions (
+    id TEXT PRIMARY KEY,
+    chain_id TEXT NOT NULL,
+    material_id TEXT NOT NULL REFERENCES materials(id) ON DELETE CASCADE,
+    version_num INTEGER NOT NULL,
+    file_hash TEXT,
+    created_by TEXT NOT NULL,
+    change_note TEXT,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_material_versions_chain ON material_versions(chain_id);
+  CREATE INDEX IF NOT EXISTS idx_material_versions_material ON material_versions(material_id);
   CREATE TABLE IF NOT EXISTS alerts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     title TEXT NOT NULL,
@@ -74,12 +86,41 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS course_members (
     course_id TEXT NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
     user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    member_role TEXT NOT NULL CHECK (member_role IN ('student', 'teacher')),
+    member_role TEXT NOT NULL CHECK (member_role IN ('teacher')),
     joined_at TEXT NOT NULL,
     PRIMARY KEY (course_id, user_id)
   );
   CREATE INDEX IF NOT EXISTS idx_course_members_user ON course_members(user_id);
 `);
+
+// ---- FTS5 全文搜索 ----
+// 说明: 使用独立的内容表 + 触发器维护，避免外部内容表对 schema 的强依赖。
+// 缺失时优雅降级为 LIKE 查询。
+let ftsAvailable = false;
+function initFTS() {
+  try {
+    db.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS materials_fts USING fts5(
+        name, type, source, course_name,
+        tokenize='unicode61'
+      );
+    `);
+    // 判断是否已同步, 如果虚拟表为空则从 materials 全量导入
+    const count = db.prepare("SELECT COUNT(*) AS n FROM materials_fts").get().n;
+
+    ftsAvailable = true;
+    if (count === 0) {
+      db.exec(`
+        INSERT INTO materials_fts(rowid, name, type, source, course_name)
+        SELECT m.rowid, m.name, m.type, m.source, c.name
+        FROM materials m JOIN courses c ON c.id = m.course_id
+      `);
+    }
+  } catch (e) {
+    console.warn("[database] FTS5 不可用，已降级为 LIKE 搜索:", e.message);
+  }
+}
+initFTS();
 
 const materialColumns = db.prepare("PRAGMA table_info(materials)").all().map(column => column.name);
 for (const statement of [
@@ -319,11 +360,177 @@ function reviewMaterial(materialId, user, status, note = "") {
   return db.prepare("SELECT * FROM materials WHERE id = ?").get(materialId);
 }
 
+// ================================================================
+// FTS5 全文检索（降级 LIKE）
+// （沿用上方 initFTS() 初始化；此处补充索引重建与查询接口）
+// ================================================================
+
+// 全量重建 FTS 索引（幂等）
+function syncFTSIndex() {
+  if (!ftsAvailable) return;
+  try {
+    db.exec("DELETE FROM materials_fts");
+    db.exec(`
+      INSERT INTO materials_fts(rowid, name, type, source, course_name)
+      SELECT m.rowid, m.name, m.type, m.source, c.name
+      FROM materials m JOIN courses c ON c.id = m.course_id
+    `);
+  } catch (e) {
+    console.warn("[database] 重建 FTS 索引失败:", e.message);
+  }
+}
+
+// FTS5 优先，失败时降级 LIKE 查询
+function searchMaterials({ q = "", courseId = "", type = "", user = null, limit = 50 }) {
+  const where = [];
+  const params = [];
+
+  if (user?.role === "student") {
+    where.push(`m.course_id IN (SELECT course_id FROM course_members WHERE user_id = ?)`);
+    params.push(user.id);
+  }
+  if (courseId) {
+    where.push(`m.course_id = ?`);
+    params.push(courseId);
+  }
+  if (type) {
+    where.push(`m.type = ?`);
+    params.push(type);
+  }
+
+  if (q.trim()) {
+    const cleanQ = q.trim().replace(/"/g, '""'); // 转义避免 FTS 语法错误（简单处理）
+    try {
+      if (ftsAvailable) {
+        const rows = db.prepare(`
+          SELECT m.id, m.name, m.type, m.source, m.version, m.date,
+                 m.file_name AS fileName, m.file_size AS fileSize, m.file_path AS filePath,
+                 m.version_chain_id AS versionChainId,
+                 m.authority_score AS authorityScore,
+                 m.is_authoritative AS isAuthoritative,
+                 m.review_status AS reviewStatus,
+                 c.id AS courseId, c.name AS courseName,
+                 bm25(materials_fts) AS rank
+          FROM materials_fts
+          JOIN materials m ON m.id = (
+            SELECT id FROM materials WHERE materials.rowid = materials_fts.rowid LIMIT 1
+          )
+          JOIN courses c ON c.id = m.course_id
+          WHERE materials_fts MATCH ?
+            ${where.length ? `AND ${where.join(" AND ")}` : ""}
+          ORDER BY rank
+          LIMIT ?
+        `).all(cleanQ, ...params, limit);
+        return rows.map(r => ({ ...r, rank: undefined }));
+      }
+    } catch (e) {
+      console.warn("[database] FTS 查询失败，降级 LIKE:", e.message);
+    }
+
+    const likeQ = `%${cleanQ}%`;
+    where.push(`(m.name LIKE ? OR m.type LIKE ? OR m.source LIKE ? OR c.name LIKE ? OR m.version LIKE ?)`);
+    params.push(likeQ, likeQ, likeQ, likeQ, likeQ);
+  }
+
+  const base = `
+    SELECT m.id, m.name, m.type, m.source, m.version, m.date,
+           m.file_name AS fileName, m.file_size AS fileSize, m.file_path AS filePath,
+           m.version_chain_id AS versionChainId,
+           m.authority_score AS authorityScore,
+           m.is_authoritative AS isAuthoritative,
+           m.review_status AS reviewStatus,
+           c.id AS courseId, c.name AS courseName
+    FROM materials m JOIN courses c ON c.id = m.course_id
+  `;
+  const finalWhere = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const rows = db.prepare(`${base} ${finalWhere} ORDER BY m.rowid DESC LIMIT ?`).all(...params, limit);
+  return rows.map(r => ({ ...r, rank: undefined }));
+}
+
+// 单个材料详情 + 版本链历史
+function getMaterialDetail(materialId, user) {
+  const m = db.prepare("SELECT * FROM materials WHERE id = ?").get(materialId);
+  if (!m) return null;
+
+  // 权限：学生访问未加入课程时拒绝
+  if (user?.role === "student" && !getMembership(m.course_id, user.id)) return null;
+
+  const versions = db.prepare(`
+    SELECT id, version, version_chain_id AS versionChainId, date, status, status_text AS statusText,
+           file_name AS fileName, file_size AS fileSize, file_path AS filePath,
+           authority_score AS authorityScore, is_authoritative AS isAuthoritative,
+           review_status AS reviewStatus, review_note AS reviewNote,
+           reviewed_by AS reviewedBy, reviewed_at AS reviewedAt
+    FROM materials
+    WHERE version_chain_id = ? ORDER BY rowid DESC
+  `).all(m.version_chain_id);
+
+  return {
+    id: m.id,
+    name: m.name,
+    type: m.type,
+    source: m.source,
+    version: m.version,
+    date: m.date,
+    status: m.status,
+    statusText: m.status_text,
+    file_name: m.file_name,
+    file_size: m.file_size,
+    file_path: m.file_path,
+    versionChainId: m.version_chain_id,
+    authorityScore: m.authority_score,
+    authorityBreakdown: m.authority_breakdown ? JSON.parse(m.authority_breakdown) : null,
+    isAuthoritative: Boolean(m.is_authoritative),
+    reviewStatus: m.review_status,
+    reviewNote: m.review_note,
+    reviewedBy: m.reviewed_by,
+    reviewedAt: m.reviewed_at,
+    versions
+  };
+}
+
+// 记录一次版本变更（发布新版本或数据同步时调用）
+function recordMaterialVersion(material, userId, changeNote) {
+  const id = crypto.randomUUID();
+  const now = new Date().toISOString();
+  db.prepare(`
+    INSERT INTO material_versions (id, chain_id, material_id, version_num, file_hash, created_by, change_note, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    id,
+    material.version_chain_id || `${material.name}:${material.type}`,
+    material.id,
+    parseInt(String(material.version || "1").replace(/\D/g, ""), 10) || 1,
+    material.file_hash || null,
+    userId,
+    changeNote || null,
+    now
+  );
+}
+
+// ================================================================
+// 权限与数据一致性辅助
+// ================================================================
+function isTeacherOrAdmin(user) {
+  return Boolean(user && (user.role === "teacher" || user.role === "admin"));
+}
+
+function canAccessCourse(user, courseId) {
+  if (!user) return false;
+  if (user.role === "admin") return true;
+  if (user.role === "teacher") return true;
+  return Boolean(getMembership(courseId, user.id));
+}
+
+initFTS();
+
 seedUsers();
 seedCourseMembers();
 
 module.exports = {
   db, readData, writeData, createSession, findUserByCredentials,
   findUserByToken, deleteSession, reviewMaterial, getMembership,
-  listUserCourses, listCourseMembers, addCourseMember, removeCourseMember
+  listUserCourses, listCourseMembers, addCourseMember, removeCourseMember,
+  searchMaterials, getMaterialDetail, recordMaterialVersion,
+  isTeacherOrAdmin, canAccessCourse, syncFTSIndex
 };

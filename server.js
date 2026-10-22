@@ -10,7 +10,9 @@ const canvas = require("./canvas");
 const {
   readData, writeData, createSession, findUserByCredentials,
   findUserByToken, deleteSession, reviewMaterial, getMembership,
-  listUserCourses, listCourseMembers, addCourseMember, removeCourseMember
+  listUserCourses, listCourseMembers, addCourseMember, removeCourseMember,
+  searchMaterials, getMaterialDetail, recordMaterialVersion,
+  isTeacherOrAdmin, canAccessCourse, syncFTSIndex
 } = require("./database");
 
 const app = express();
@@ -268,7 +270,7 @@ app.get("/api/dashboard", requireAuth, async (_req, res, next) => {
   } catch(error) { next(error); }
 });
 
-app.get("/api/courses", async (req, res, next) => {
+app.get("/api/courses", requireAuth, async (req, res, next) => {
   try {
     const data = readData();
     const keyword = String(req.query.q || "").toLowerCase();
@@ -290,6 +292,49 @@ app.get("/api/courses/:courseId/materials", requireAuth, async (req, res, next) 
     applyAuthority([course]);
     res.json({ course, materials: course.materials });
   } catch(error) { next(error); }
+});
+
+// 全文搜索资料 - 需要登录且只能看到有权限访问的课程资料
+app.get("/api/search", requireAuth, (req, res, next) => {
+  try {
+    const q = String(req.query.q || "").trim();
+    const courseId = String(req.query.course_id || "").trim() || undefined;
+    const type = String(req.query.type || "").trim() || undefined;
+    const limit = Math.min(Math.max(parseInt(req.query.limit) || 20, 1), 100);
+
+    const user = currentUser(req);
+    const data = readData();
+
+    // 构建权限过滤：学生只能看已加入的课程；教师/管理员可看全部
+    let allowedCourseIds = null;
+    if (user?.role === "student") {
+      allowedCourseIds = listUserCourses(user.id).map(c => c.id);
+    }
+
+    const results = searchMaterials({ q, courseId, type, user, limit });
+
+    // 额外按课程权限过滤（学生无法访问未加入课程的搜索结果）
+    let filtered = results;
+    if (allowedCourseIds) {
+      filtered = results.filter(r => allowedCourseIds.includes(r.courseId));
+    }
+
+    res.json({
+      query: { q, courseId, type, limit },
+      count: filtered.length,
+      results: filtered
+    });
+  } catch (error) { next(error); }
+});
+
+// 单个资料详情 + 版本时间线
+app.get("/api/materials/:materialId", requireAuth, (req, res, next) => {
+  try {
+    const user = currentUser(req);
+    const detail = getMaterialDetail(req.params.materialId, user);
+    if (!detail) return res.status(404).json({ error: "MATERIAL_NOT_FOUND", message: "资料不存在或无权访问" });
+    res.json({ material: detail });
+  } catch (error) { next(error); }
 });
 
 app.get("/api/me/courses", requireAuth, (req, res) => {
