@@ -361,6 +361,42 @@ function reviewMaterial(materialId, user, status, note = "") {
 }
 
 // ================================================================
+// 资料生命周期管理：归档 / 恢复 / 删除
+// ================================================================
+
+// 归档或恢复资料（管理员 / 教师）
+function setArchived(materialId, user, archived) {
+  if (!user || !["teacher", "admin"].includes(user.role)) return null;
+  const material = db.prepare("SELECT id, course_id FROM materials WHERE id = ?").get(materialId);
+  if (!material) return null;
+  const now = new Date().toISOString();
+  const status = archived ? "archived" : "active";
+  const statusText = archived ? "已归档" : "已恢复";
+  db.prepare(`
+    UPDATE materials
+    SET status = ?, status_text = ?
+    WHERE id = ?
+  `).run(status, statusText, materialId);
+  return db.prepare("SELECT * FROM materials WHERE id = ?").get(materialId);
+}
+
+// 物理删除资料（管理员 / 教师），同时清理版本记录和索引
+function removeMaterial(materialId, user) {
+  if (!user || !["teacher", "admin"].includes(user.role)) return null;
+  const material = db.prepare("SELECT id, file_path FROM materials WHERE id = ?").get(materialId);
+  if (!material) return null;
+  // 清理文件与索引
+  const fs = require("node:fs");
+  if (material.file_path) {
+    const fullPath = require("node:path").join(__dirname, material.file_path);
+    try { if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath); } catch (e) { /* 忽略删除失败 */ }
+  }
+  syncFTSIndex();
+  db.prepare("DELETE FROM materials WHERE id = ?").run(materialId);
+  return { id: materialId, deleted: true };
+}
+
+// ================================================================
 // FTS5 全文检索（降级 LIKE）
 // （沿用上方 initFTS() 初始化；此处补充索引重建与查询接口）
 // ================================================================
@@ -532,5 +568,6 @@ module.exports = {
   findUserByToken, deleteSession, reviewMaterial, getMembership,
   listUserCourses, listCourseMembers, addCourseMember, removeCourseMember,
   searchMaterials, getMaterialDetail, recordMaterialVersion,
-  isTeacherOrAdmin, canAccessCourse, syncFTSIndex
+  isTeacherOrAdmin, canAccessCourse, syncFTSIndex,
+  setArchived, removeMaterial
 };
