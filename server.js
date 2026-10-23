@@ -12,7 +12,8 @@ const {
   findUserByToken, deleteSession, reviewMaterial, getMembership,
   listUserCourses, listCourseMembers, addCourseMember, removeCourseMember,
   searchMaterials, getMaterialDetail, recordMaterialVersion,
-  isTeacherOrAdmin, canAccessCourse, syncFTSIndex
+  isTeacherOrAdmin, canAccessCourse, syncFTSIndex,
+  setArchived, removeMaterial
 } = require("./database");
 
 const app = express();
@@ -426,6 +427,20 @@ app.put("/api/materials/:materialId/review", requireAuth, requireRole("teacher",
       reviewNote: material.review_note
     }
   });
+});
+
+// 归档或恢复资料（管理员 / 教师）
+app.put("/api/materials/:materialId/archive", requireAuth, requireRole("teacher", "admin"), (req, res) => {
+  const material = setArchived(req.params.materialId, req.user, (req.body && req.body.archived) !== false);
+  if (!material) return res.status(404).json({ error: "MATERIAL_NOT_FOUND", message: "资料不存在或无权操作" });
+  res.json({ material: { id: material.id, status: material.status, statusText: material.status_text } });
+});
+
+// 物理删除资料（管理员 / 教师）
+app.delete("/api/materials/:materialId", requireAuth, requireRole("teacher", "admin"), (req, res) => {
+  const result = removeMaterial(req.params.materialId, req.user);
+  if (!result) return res.status(404).json({ error: "MATERIAL_NOT_FOUND", message: "资料不存在或无权删除" });
+  res.json({ deleted: true, id: result.id || req.params.materialId });
 });
 
 app.post("/api/materials", requireAuth, requireRole("teacher", "admin"), async (req, res, next) => {

@@ -26,6 +26,7 @@
           <button class="nav-item" data-view="courses"><span class="nav-icon">▦</span>我的课程</button>
           <button class="nav-item" data-view="alerts"><span class="nav-icon">◉</span>变更提醒 <em>3</em></button>
           <button class="nav-item" data-view="archive"><span class="nav-icon">↺</span>历史归档</button>
+          <button class="nav-item" id="nav-admin" data-view="admin" hidden><span class="nav-icon">➤</span>管理后台</button>
         </nav>
         <div class="sidebar-section">
           <div class="section-label">我的课程 <button id="add-course" title="添加课程">＋</button></div>
@@ -101,6 +102,102 @@
           <div class="archive-table"><div class="table-head"><span>资料名称</span><span>课程 / 章节</span><span>版本</span><span>状态</span><span>更新时间</span></div><div id="archive-rows"></div></div>
         </section>
 
+        <section id="admin-view" class="view" hidden>
+          <div class="page-intro"><div><span class="tiny-label">ADMIN CONSOLE</span><h1>管理后台</h1><p>资料审核、生命周期与治理统计的集中控制台。</p></div>
+            <div class="admin-header-actions">
+              <button class="outline-button" id="admin-export">导出数据</button>
+              <button class="primary-button" id="admin-open-add">＋ 添加资料</button>
+            </div>
+          </div>
+          <div class="admin-stats" id="admin-stats"></div>
+          <div class="admin-card">
+            <div class="admin-card-head"><h3>资料治理状态</h3><span class="count-badge">全部资料</span></div>
+            <div class="admin-table-wrap">
+              <table class="admin-table">
+                <thead><tr>
+                  <th>资料名称</th><th>课程</th><th>版本</th><th>来源</th><th>审核</th><th>生命周期</th><th>操作</th>
+                </tr></thead>
+                <tbody id="admin-rows"></tbody>
+              </table>
+            </div>
+            <div id="admin-empty" class="empty-state" hidden>后台暂无资料，点击「添加资料」录入第一份。</div>
+          </div>
+        </section>
+
+        <section id="course-detail-view" class="view">
+          <div class="detail-head sticky-detail-head">
+            <div>
+              <button class="back-link" data-view-target="courses">← 返回我的课程</button>
+              <h1 id="course-name"></h1>
+              <p id="course-desc"></p>
+            </div>
+            <div class="detail-metrics" id="course-detail-metrics">
+              <div class="metric"><strong id="course-metric-count">—</strong><small>资料总数</small></div>
+              <div class="metric"><strong id="course-metric-official">—</strong><small>官方资料</small></div>
+              <div class="metric"><strong id="course-metric-owned">—</strong><small>我的收集</small></div>
+            </div>
+          </div>
+          <div class="search-panel search-panel-plain">
+            <div class="search-box search-box-plain"><span>⌕</span><input id="course-detail-search" type="search" placeholder="搜索本课程资料…" /></div>
+            <div class="quick-filters" id="course-detail-filters">
+              <button class="filter-chip active" data-filter="all">全部</button>
+              <button class="filter-chip" data-filter="official">官方资料</button>
+              <button class="filter-chip" data-filter="student">学生整理</button>
+              <button class="filter-chip" data-filter="recent">最近更新</button>
+            </div>
+          </div>
+          <div id="course-detail-content" class="material-group"></div>
+          <div id="course-detail-empty" class="empty-state" hidden>该课程还没有资料，点击右上角「＋ 添加资料」录入第一份。</div>
+        </section>
+
+        <section id="material-detail-view" class="view">
+          <div class="material-master">
+            <div class="material-master-head">
+              <button class="back-link" id="material-back"></button>
+              <span class="tag status-tag official" id="material-badge">官方资料</span>
+            </div>
+            <h1 id="material-name"></h1>
+            <div class="material-kind-line"><span id="material-type"></span> · <span id="material-source"></span> · <span id="material-date"></span></div>
+
+            <div class="master-card" id="material-auth-card">
+              <span class="tiny-label">AUTHORITY / 权威判定</span>
+              <div class="master-score"><strong id="material-score">0.85</strong><small>权威评分</small></div>
+              <div class="master-bars">
+                <div class="master-bar"><span>来源权威度</span><div class="mini-progress"><span id="bar-source" style="width:0%"></span></div><em id="val-source">0%</em></div>
+                <div class="master-bar"><span>时间新度</span><div class="mini-progress"><span id="bar-fresh" style="width:0%"></span></div><em id="val-fresh">0%</em></div>
+                <div class="master-bar"><span>内容变更度</span><div class="mini-progress"><span id="bar-change" style="width:0%"></span></div><em id="val-change">0%</em></div>
+              </div>
+              <p class="master-explain" id="material-auth-explain"></p>
+            </div>
+
+            <div class="master-card" id="material-lifecycle">
+              <span class="tiny-label">LIFECYCLE / 生命周期</span>
+              <div class="master-life-row">
+                <span class="tag status-tag" id="material-status-tag"></span>
+                <span id="material-status-note"></span>
+              </div>
+              <div class="master-actions" id="material-actions"></div>
+            </div>
+          </div>
+          <div class="material-aside">
+            <div class="master-card">
+              <span class="tiny-label">CONTENT / 内容摘要</span>
+              <p class="material-summary" id="material-summary">暂无内容摘要。</p>
+              <div class="broken-file" id="material-filezone">
+                <span class="file-pill">⇩</span>
+                <div>
+                  <strong id="material-filename"></strong>
+                  <div class="master-life-row"><a class="download-link" id="material-download" href="#">下载文件</a><span id="material-filesize"></span></div>
+                </div>
+              </div>
+            </div>
+            <div class="master-card">
+              <span class="tiny-label">VERSION TIMELINE / 版本时间线</span>
+              <div class="timeline" id="material-version-timeline"></div>
+            </div>
+          </div>
+        </section>
+
         <footer class="app-footer"><span>课脉 · 课程资料版本治理与可信检索 MVP</span><span>数据仅用于演示 · 最后同步于 2026.10.15</span></footer>
       </main>
     </div>
@@ -128,5 +225,6 @@
     <div class="toast" id="toast"><span>✓</span><p></p></div>
     <script src="mock-data.js"></script>
     <script src="app.js"></script>
+    <script src="enhancements.js"></script>
   </body>
 </html>
