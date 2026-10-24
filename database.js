@@ -118,7 +118,89 @@ db.exec(`
     created_at TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_sync_job_logs_job ON sync_job_logs(job_id, id);
+  -- material_files：一个资料版本可以对应多个文件
+  CREATE TABLE IF NOT EXISTS material_files (
+    id TEXT PRIMARY KEY,
+    material_id TEXT NOT NULL REFERENCES materials(id) ON DELETE CASCADE,
+    file_name TEXT NOT NULL,
+    file_size INTEGER,
+    file_path TEXT,
+    file_hash TEXT,
+    mime TEXT,
+    uploaded_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_material_files_material ON material_files(material_id);
+  -- material_reviews：同一资料多次审核记录
+  CREATE TABLE IF NOT EXISTS material_reviews (
+    id TEXT PRIMARY KEY,
+    material_id TEXT NOT NULL REFERENCES materials(id) ON DELETE CASCADE,
+    reviewer_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+    action TEXT NOT NULL CHECK (action IN ('approved', 'rejected')),
+    note TEXT,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_material_reviews_material ON material_reviews(material_id);
+  -- material_changes：谁在什么时间修改了什么（变更审计）
+  CREATE TABLE IF NOT EXISTS material_changes (
+    id TEXT PRIMARY KEY,
+    material_id TEXT NOT NULL REFERENCES materials(id) ON DELETE CASCADE,
+    changed_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+    field_name TEXT,
+    old_value TEXT,
+    new_value TEXT,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_material_changes_material ON material_changes(material_id);
+  -- audit_logs：统一操作审计
+  CREATE TABLE IF NOT EXISTS audit_logs (
+    id TEXT PRIMARY KEY,
+    user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+    action TEXT NOT NULL,
+    entity_type TEXT,
+    entity_id TEXT,
+    detail TEXT,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_audit_logs_created ON audit_logs(created_at);
+  -- search_documents：搜索索引文档
+  CREATE TABLE IF NOT EXISTS search_documents (
+    id TEXT PRIMARY KEY,
+    material_id TEXT REFERENCES materials(id) ON DELETE CASCADE,
+    document_type TEXT NOT NULL DEFAULT 'material',
+    title TEXT,
+    content TEXT,
+    metadata TEXT,
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_search_documents_material ON search_documents(material_id);
 `);
+
+// ---- 数据模型迁移（幂等，针对既有数据库增量加列） ----
+(function migrateSchema() {
+  const ensureColumn = (table, column, def) => {
+    try {
+      const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+      if (!cols.includes(column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${def}`);
+    } catch (err) {
+      console.warn(`[database] 迁移 ${table}.${column} 失败:`, err.message);
+    }
+  };
+  // 版本分支/父级/权威
+  ensureColumn("material_versions", "parent_version_id", "TEXT REFERENCES material_versions(id) ON DELETE SET NULL");
+  ensureColumn("material_versions", "version_type", "TEXT NOT NULL DEFAULT 'official' CHECK (version_type IN ('official','student','admin','trash'))");
+  ensureColumn("material_versions", "tree_path", "TEXT");
+  // 撤销与恢复（逻辑删除）
+  ensureColumn("materials", "retracted", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn("materials", "retracted_at", "TEXT");
+  ensureColumn("materials", "retracted_by", "TEXT");
+  // 搜索文档
+  ensureColumn("search_documents", "material_name", "TEXT");
+  ensureColumn("search_documents", "course_id", "TEXT");
+  // 资料文件状态（归档/恢复）——旧库迁移
+  ensureColumn("material_files", "status", "TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived'))");
+})();
 
 // ---- FTS5 全文搜索 ----
 // 说明: 使用独立的内容表 + 触发器维护，避免外部内容表对 schema 的强依赖。
@@ -687,6 +769,145 @@ function courseHasTeacher(courseId, userId) {
   return Boolean(db.prepare("SELECT 1 FROM course_members WHERE course_id = ? AND user_id = ? AND member_role = 'teacher'").get(courseId, userId));
 }
 
+// ================================================================
+// 资料文件（material_files）
+// ================================================================
+
+function addMaterialFile({ materialId, fileName = null, fileSize = null, filePath = null, fileHash = null, mime = null, uploadedBy = null }) {
+  const id = crypto.randomUUID();
+  const now = new Date().toISOString();
+  db.prepare(`
+    INSERT INTO material_files (id, material_id, file_name, file_size, file_path, file_hash, mime, uploaded_by, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(id, materialId, fileName, fileSize, filePath, fileHash, mime, uploadedBy, now);
+  return getMaterialFiles(materialId);
+}
+
+function getMaterialFiles(materialId) {
+  return db.prepare(`
+    SELECT id, material_id AS materialId, file_name AS fileName, file_size AS fileSize,
+           file_path AS filePath, file_hash AS fileHash, mime,
+           uploaded_by AS uploadedBy, status, created_at AS createdAt
+    FROM material_files WHERE material_id = ? ORDER BY created_at ASC
+  `).all(materialId);
+}
+
+function removeMaterialFile(id) {
+  const row = db.prepare("SELECT material_id FROM material_files WHERE id = ?").get(id);
+  if (!row) return null;
+  db.prepare("DELETE FROM material_files WHERE id = ?").run(id);
+  return row.material_id;
+}
+
+// 归档资料文件：archive=true 时 status=archived（file_path 保留以便恢复）；false 时回到 active。
+function setMaterialFileArchived(id, archived) {
+  const status = archived ? "archived" : "active";
+  const info = db.prepare("UPDATE material_files SET status = ? WHERE id = ?").run(status, id);
+  return info.changes > 0;
+}
+
+function restoreMaterialFile(id) {
+  return setMaterialFileArchived(id, false);
+}
+
+// ================================================================
+// 资料审核（material_reviews）
+// ================================================================
+
+function addMaterialReview({ materialId, reviewerId, action, note = "" }) {
+  const id = crypto.randomUUID();
+  const now = new Date().toISOString();
+  db.prepare(`
+    INSERT INTO material_reviews (id, material_id, reviewer_id, action, note, created_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(id, materialId, reviewerId, action, note, now);
+  return getMaterialReviews(materialId);
+}
+
+function getMaterialReviews(materialId) {
+  return db.prepare(`
+    SELECT id, material_id AS materialId, reviewer_id AS reviewerId, action, note, created_at AS createdAt
+    FROM material_reviews WHERE material_id = ? ORDER BY created_at DESC
+  `).all(materialId);
+}
+
+// ================================================================
+// 变更审计（material_changes）
+// ================================================================
+
+function addMaterialChange({ materialId, changedBy = null, field, oldValue = null, newValue = null }) {
+  const id = crypto.randomUUID();
+  const now = new Date().toISOString();
+  db.prepare(`
+    INSERT INTO material_changes (id, material_id, changed_by, field_name, old_value, new_value, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(id, materialId, changedBy, field, oldValue, newValue, now);
+  return getMaterialChanges(materialId);
+}
+
+function getMaterialChanges(materialId, { limit = 100 } = {}) {
+  return db.prepare(`
+    SELECT id, material_id AS materialId, changed_by AS changedBy, field_name AS field,
+           old_value AS oldValue, new_value AS newValue, created_at AS createdAt
+    FROM material_changes WHERE material_id = ? ORDER BY created_at DESC LIMIT ?
+  `).all(materialId, limit);
+}
+
+// ================================================================
+// 审计日志（audit_logs）
+// ================================================================
+
+function appendAuditLog({ userId = null, action, entityType = null, entityId = null, detail = null }) {
+  const id = crypto.randomUUID();
+  const now = new Date().toISOString();
+  db.prepare(`
+    INSERT INTO audit_logs (id, user_id, action, entity_type, entity_id, detail, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(id, userId, action, entityType, entityId, detail, now);
+  return { id, action, entityType, entityId, createdAt: now };
+}
+
+function listAuditLogs({ limit = 100, entityType = "" } = {}) {
+  let sql = "SELECT id, user_id AS userId, action, entity_type AS entityType, entity_id AS entityId, detail, created_at AS createdAt FROM audit_logs";
+  const params = [];
+  const clauses = [];
+  if (entityType) {
+    clauses.push("entity_type = ?");
+    params.push(entityType);
+  }
+  if (clauses.length) sql += " WHERE " + clauses.join(" AND ");
+  sql += " ORDER BY created_at DESC LIMIT ?";
+  params.push(limit);
+  return db.prepare(sql).all(...params);
+}
+
+// ================================================================
+// 搜索文档（search_documents）
+// ================================================================
+
+function upsertSearchDocument({ materialId, documentType = "material", title = null, content = null, metadata = null }) {
+  const now = new Date().toISOString();
+  const existing = db.prepare("SELECT id FROM search_documents WHERE material_id = ?").get(materialId);
+  if (existing) {
+    db.prepare(`
+      UPDATE search_documents
+      SET title = ?, content = ?, metadata = ?, updated_at = ?
+      WHERE material_id = ?
+    `).run(title, content, metadata ? JSON.stringify(metadata) : null, now, materialId);
+    return existing.id;
+  }
+  const id = crypto.randomUUID();
+  db.prepare(`
+    INSERT INTO search_documents (id, material_id, document_type, title, content, metadata, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(id, materialId, documentType, title, content, metadata ? JSON.stringify(metadata) : null, now);
+  return id;
+}
+
+function removeSearchDocument(materialId) {
+  db.prepare("DELETE FROM search_documents WHERE material_id = ?").run(materialId);
+}
+
 module.exports = {
   db, readData, writeData, createSession, findUserByCredentials,
   findUserByToken, deleteSession, reviewMaterial, getMembership,
@@ -695,5 +916,11 @@ module.exports = {
   isTeacherOrAdmin, canAccessCourse, syncFTSIndex,
   setArchived, removeMaterial,
   createSyncJob, getSyncJob, listSyncJobs, updateSyncJob,
-  appendSyncJobLog, getSyncJobLogs, requireSyncJobAccess
+  appendSyncJobLog, getSyncJobLogs, requireSyncJobAccess,
+  addMaterialFile, getMaterialFiles, removeMaterialFile,
+  listMaterialFiles: getMaterialFiles, setMaterialFileArchived, restoreMaterialFile,
+  addMaterialReview, getMaterialReviews,
+  addMaterialChange, getMaterialChanges,
+  appendAuditLog, listAuditLogs,
+  upsertSearchDocument, removeSearchDocument
 };

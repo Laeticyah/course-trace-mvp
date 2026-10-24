@@ -170,3 +170,126 @@ describe("课脉核心功能回归", () => {
     }
   });
 });
+
+// Stage3: 数据模型升级 —— 新表迁移幂等 + helper CRUD
+describe("数据模型升级（material_files / material_reviews / material_changes / audit_logs / search_documents）", () => {
+  it("迁移已执行且幂等（重复加载 database 不会报错）", async () => {
+    const db1 = require("../database.js");
+    const db2 = require("../database.js");
+    // 第二次 require 走缓存，关键是不抛错；同时验证表结构存在
+    const tables = db1.db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all().map((r) => r.name);
+    for (const t of ["material_files", "material_reviews", "material_changes", "audit_logs", "search_documents"]) {
+      assert.ok(tables.includes(t), `缺少表 ${t}`);
+    }
+  });
+
+  it("material_files 增删改查 & 关联版本", async () => {
+    const db = require("../database.js");
+    const data = db.readData();
+    const course = data.courses[0];
+    const material = (course.materials || [])[0];
+    assert.ok(material, "应存在示例资料");
+    const files = db.addMaterialFile({
+      materialId: material.id,
+      fileName: "测试附件.pdf",
+      fileSize: 12345,
+      filePath: "uploads/test/测试附件.pdf",
+      fileHash: "abc123",
+    });
+    assert.ok(Array.isArray(files), "addMaterialFile 返回文件列表数组");
+    assert.ok(files.some((f) => f.fileName === "测试附件.pdf"), "文件应能被查询到");
+    const all = db.getMaterialFiles(material.id);
+    assert.ok(Array.isArray(all) && all.length > 0, "getMaterialFiles 返回非空列表");
+    const target = all.find((f) => f.fileName === "测试附件.pdf");
+    assert.ok(target && target.filePath !== null, "新增文件应有 filePath");
+    // 归档后 filePath 不应丢失（保留以便恢复访问）
+    db.setMaterialFileArchived(target.id, true);
+    const archived = db.getMaterialFiles(material.id).find((f) => f.id === target.id);
+    assert.ok(archived && archived.filePath !== null, "归档后 filePath 应保留");
+    assert.ok(archived.status === "archived", "归档后 status 应为 archived");
+    db.setMaterialFileArchived(target.id, false);
+    const restored = db.getMaterialFiles(material.id).find((f) => f.id === target.id);
+    assert.ok(restored && restored.status === "active", "恢复后 status 应为 active");
+    // 删除
+    db.removeMaterialFile(target.id);
+    assert.ok(!db.getMaterialFiles(material.id).some((f) => f.id === target.id), "删除后不应存在");
+  });
+
+  it("material_reviews 记录审核 & 查询", async () => {
+    const db = require("../database.js");
+    const data = db.readData();
+    const material = ((data.courses[0] || {}).materials || [])[0];
+    assert.ok(material, "应存在示例资料");
+    const reviews = db.addMaterialReview({
+      materialId: material.id,
+      reviewerId: "teacher-demo",
+      action: "approved",
+      note: "内容合规",
+    });
+    assert.ok(Array.isArray(reviews), "addMaterialReview 返回审核列表数组");
+    assert.ok(reviews.some((r) => r.action === "approved"), "审核记录应可查询");
+    const last = reviews[0];
+    assert.strictEqual(last.action, "approved");
+  });
+
+  it("material_reviews 记录审核 & 查询", async () => {
+    const db = require("../database.js");
+    const data = db.readData();
+    const material = ((data.courses[0] || {}).materials || [])[0];
+    assert.ok(material, "应存在示例资料");
+    const review = db.addMaterialReview({
+      materialId: material.id,
+      reviewerId: "teacher-demo",
+      action: "approved",
+      note: "内容合规",
+    });
+    assert.ok(Array.isArray(review) && review.length > 0, "addMaterialReview 返回审核列表");
+    const inserted = review[0];
+    assert.ok(inserted.id, "审核记录应带有 id");
+    const reviews = db.getMaterialReviews(material.id);
+    assert.ok(reviews.some((r) => r.id === inserted.id), "审核记录应可查询");
+    assert.strictEqual(reviews[0].action, "approved");
+  });
+
+  it("audit_logs 写读 & 列表", async () => {
+    const db = require("../database.js");
+    const before = db.listAuditLogs({ limit: 5 });
+    const log = db.appendAuditLog({
+      userId: "admin-demo",
+      action: "sync_job.created",
+      entityType: "sync_job",
+      entityId: "job-test-1",
+      detail: "创建测试任务",
+    });
+    assert.ok(log && log.id, "appendAuditLog 返回带 id 的对象");
+    const list = db.listAuditLogs({ limit: 50 });
+    assert.ok(list.length > 0, "audit 列表非空");
+    assert.ok(list.some((l) => l.id === log.id), "新日志应可查询");
+  });
+
+  it("search_documents upsert & 移除", async () => {
+    const db = require("../database.js");
+    const data = db.readData();
+    const material = ((data.courses[0] || {}).materials || [])[0];
+    assert.ok(material, "应存在示例资料");
+    const docId = db.upsertSearchDocument({
+      materialId: material.id,
+      documentType: "material",
+      title: material.name,
+      content: `${material.name} ${material.type || ""} ${material.version || ""}`.trim(),
+    });
+    assert.ok(docId, "upsertSearchDocument 返回文档 id");
+    // 幂等：重复 upsert 不产生重复记录
+    db.upsertSearchDocument({
+      materialId: material.id,
+      documentType: "material",
+      title: material.name,
+      content: "updated",
+    });
+    const count = db.db.prepare("SELECT COUNT(*) AS n FROM search_documents WHERE material_id = ?").get(material.id).n;
+    assert.strictEqual(count, 1, "同 material 只保留一条搜索文档");
+    db.removeSearchDocument(material.id);
+    const after = db.db.prepare("SELECT COUNT(*) AS n FROM search_documents WHERE material_id = ?").get(material.id).n;
+    assert.strictEqual(after, 0, "移除后不存在");
+  });
+});
