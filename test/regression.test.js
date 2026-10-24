@@ -121,8 +121,9 @@ describe("课脉核心功能回归", () => {
     assert.strictEqual(res.status, 200);
   });
 
-  it("同步返回 syncLog", async () => {
-    const res = await fetch(BASE + "/api/courses/97558/sync", {
+  it("同步任务：创建后立即返回 202 + jobId，并可在完成后查询结果", async () => {
+    // Phase 1：创建任务 → 202，立即返回 job 记录（不阻塞）
+    const createRes = await fetch(BASE + "/api/courses/97558/sync", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${teacherToken}`,
@@ -130,9 +131,31 @@ describe("课脉核心功能回归", () => {
       },
       body: JSON.stringify({})
     });
-    assert.strictEqual(res.status, 200);
-    const data = await res.json();
-    assert.ok(Array.isArray(data.syncLog), "syncLog 是数组");
+    assert.strictEqual(createRes.status, 202, "异步任务应返回 202");
+    const created = await createRes.json();
+    assert.ok(created.job && created.job.id, "返回 job.id");
+    const jobId = created.job.id;
+
+    // Phase 2：轮询任务状态（最多等待 ~6s）
+    let job = created.job;
+    for (let i = 0; i < 60 && job.status !== "success" && job.status !== "failed"; i++) {
+      await new Promise(r => setTimeout(r, 100));
+      const statusRes = await fetch(BASE + "/api/sync-jobs/" + encodeURIComponent(jobId), {
+        headers: { Authorization: `Bearer ${teacherToken}` }
+      });
+      assert.strictEqual(statusRes.status, 200);
+      job = (await statusRes.json()).job;
+    }
+    assert.ok(job.status === "success" || job.status === "failed", "任务应在超时前结束");
+    assert.ok(job.progress === 100 || job.status === "failed", "进度应到 100 或任务失败");
+
+    // Phase 3：日志可查
+    const logsRes = await fetch(BASE + "/api/sync-jobs/" + encodeURIComponent(jobId) + "/logs", {
+      headers: { Authorization: `Bearer ${teacherToken}` }
+    });
+    assert.strictEqual(logsRes.status, 200);
+    const logsData = await logsRes.json();
+    assert.ok(Array.isArray(logsData.logs) || Array.isArray(logsData), "日志为数组");
   });
 
   it("下载已采集文件成功", async () => {

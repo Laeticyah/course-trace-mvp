@@ -91,6 +91,33 @@ db.exec(`
     PRIMARY KEY (course_id, user_id)
   );
   CREATE INDEX IF NOT EXISTS idx_course_members_user ON course_members(user_id);
+  CREATE TABLE IF NOT EXISTS sync_jobs (
+    id TEXT PRIMARY KEY,
+    course_id TEXT REFERENCES courses(id) ON DELETE CASCADE,
+    scope TEXT NOT NULL DEFAULT 'course',
+    status TEXT NOT NULL DEFAULT 'pending',
+    progress INTEGER NOT NULL DEFAULT 0,
+    current_step TEXT,
+    error TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    max_attempts INTEGER NOT NULL DEFAULT 3,
+    created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    finished_at TEXT,
+    result TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_sync_jobs_status ON sync_jobs(status);
+  CREATE INDEX IF NOT EXISTS idx_sync_jobs_course ON sync_jobs(course_id);
+  CREATE TABLE IF NOT EXISTS sync_job_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id TEXT NOT NULL REFERENCES sync_jobs(id) ON DELETE CASCADE,
+    level TEXT NOT NULL DEFAULT 'info',
+    message TEXT NOT NULL,
+    meta TEXT,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_sync_job_logs_job ON sync_job_logs(job_id, id);
 `);
 
 // ---- FTS5 全文搜索 ----
@@ -563,11 +590,110 @@ initFTS();
 seedUsers();
 seedCourseMembers();
 
+// ================================================================
+// 同步任务（sync jobs）
+// ================================================================
+
+const SYNC_STATUSES = ["pending", "running", "success", "failed", "cancelled"];
+
+function normalizeSyncJob(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    courseId: row.course_id,
+    scope: row.scope,
+    status: row.status,
+    progress: Number(row.progress),
+    currentStep: row.current_step || null,
+    error: row.error || null,
+    attempts: Number(row.attempts),
+    maxAttempts: Number(row.max_attempts),
+    createdBy: row.created_by || null,
+    createdAt: row.created_at,
+    startedAt: row.started_at,
+    finishedAt: row.finished_at,
+    result: row.result ? JSON.parse(row.result) : null
+  };
+}
+
+function createSyncJob({ courseId = null, scope = "course", createdBy = null, maxAttempts = 3 }) {
+  const id = crypto.randomUUID();
+  const now = new Date().toISOString();
+  db.prepare(`
+    INSERT INTO sync_jobs (id, course_id, scope, status, progress, current_step, error, attempts, max_attempts, created_by, created_at)
+    VALUES (?, ?, ?, 'pending', 0, NULL, NULL, 0, ?, ?, ?)
+  `).run(id, courseId, scope, maxAttempts, createdBy, now);
+  return getSyncJob(id);
+}
+
+function getSyncJob(id) {
+  const row = db.prepare("SELECT * FROM sync_jobs WHERE id = ?").get(id);
+  return normalizeSyncJob(row);
+}
+
+function listSyncJobs({ status = "", limit = 50 } = {}) {
+  let sql = "SELECT * FROM sync_jobs";
+  const params = [];
+  if (status) {
+    sql += " WHERE status = ?";
+    params.push(status);
+  }
+  sql += " ORDER BY created_at DESC LIMIT ?";
+  params.push(limit);
+  return db.prepare(sql).all(...params).map(normalizeSyncJob);
+}
+
+function updateSyncJob(id, patch) {
+  const job = getSyncJob(id);
+  if (!job) return null;
+  const allowed = ["progress", "currentStep", "error", "attempts", "status"];
+  const changes = allowed.filter((k) => patch[k] !== undefined);
+  if (changes.length > 0) {
+    const setSql = changes.map((k) => `${k === "currentStep" ? "current_step" : k} = ?`).join(", ");
+    const now = new Date().toISOString();
+    const extra = [];
+    if (patch.status === "running" && !job.startedAt) extra.push(`started_at = '${now}'`);
+    if (patch.status === "success" || patch.status === "failed" || patch.status === "cancelled") extra.push(`finished_at = '${now}'`);
+    db.prepare(`UPDATE sync_jobs SET ${setSql}${extra.length ? ", " + extra.join(", ") : ""} WHERE id = ?`)
+      .run(...changes.map((k) => patch[k]), id);
+  }
+  return getSyncJob(id);
+}
+
+function appendSyncJobLog(jobId, level, message, meta = null) {
+  const now = new Date().toISOString();
+  db.prepare("INSERT INTO sync_job_logs (job_id, level, message, meta, created_at) VALUES (?, ?, ?, ?, ?)")
+    .run(jobId, level, message, meta ? JSON.stringify(meta) : null, now);
+  return getSyncJobLogs(jobId).slice(-1)[0] || null;
+}
+
+function getSyncJobLogs(jobId, { limit = 500 } = {}) {
+  return db.prepare(`
+    SELECT id, job_id AS jobId, level, message, meta, created_at AS createdAt
+    FROM sync_job_logs WHERE job_id = ? ORDER BY id DESC LIMIT ?
+  `).all(jobId, limit).reverse();
+}
+
+function requireSyncJobAccess(job, user) {
+  if (!job) return { ok: false, status: 404, error: "SYNC_JOB_NOT_FOUND", message: "同步任务不存在" };
+  if (user.role === "admin") return { ok: true };
+  // 教师可查看自己创建的任务；course_id 为 null 的全局任务仅管理员可查
+  if (job.createdBy === user.id) return { ok: true };
+  if (job.courseId && user.role === "teacher" && courseHasTeacher(job.courseId, user.id)) return { ok: true };
+  return { ok: false, status: 403, error: "SYNC_JOB_NO_ACCESS", message: "无权查看此同步任务" };
+}
+
+function courseHasTeacher(courseId, userId) {
+  return Boolean(db.prepare("SELECT 1 FROM course_members WHERE course_id = ? AND user_id = ? AND member_role = 'teacher'").get(courseId, userId));
+}
+
 module.exports = {
   db, readData, writeData, createSession, findUserByCredentials,
   findUserByToken, deleteSession, reviewMaterial, getMembership,
   listUserCourses, listCourseMembers, addCourseMember, removeCourseMember,
   searchMaterials, getMaterialDetail, recordMaterialVersion,
   isTeacherOrAdmin, canAccessCourse, syncFTSIndex,
-  setArchived, removeMaterial
+  setArchived, removeMaterial,
+  createSyncJob, getSyncJob, listSyncJobs, updateSyncJob,
+  appendSyncJobLog, getSyncJobLogs, requireSyncJobAccess
 };

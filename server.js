@@ -13,8 +13,11 @@ const {
   listUserCourses, listCourseMembers, addCourseMember, removeCourseMember,
   searchMaterials, getMaterialDetail, recordMaterialVersion,
   isTeacherOrAdmin, canAccessCourse, syncFTSIndex,
-  setArchived, removeMaterial
+  setArchived, removeMaterial,
+  createSyncJob, getSyncJob, listSyncJobs, updateSyncJob,
+  appendSyncJobLog, getSyncJobLogs, requireSyncJobAccess
 } = require("./database");
+const syncEngine = require("./sync-engine");
 
 const app = express();
 const port = Number(process.env.PORT || 4173);
@@ -552,146 +555,80 @@ function findExistingMaterial(course, name, source) {
 }
 
 /**
- * POST /api/courses/:courseId/sync
- * 从 Canvas（真实 API 或模拟模式）采集课程资料并入库。
- * 仅教师 / 管理员可触发。
+ * 同步任务 API（Stage 3：可靠异步同步）
+ *
+ * 设计决策：
+ *   - 不在 HTTP 请求内执行完整同步（避免长时间阻塞单次请求）
+ *   - POST 后立即返回 202 + jobId，任务进入后台队列执行
+ *   - 前端通过 GET /api/sync-jobs/:id 轮询，或 GET /api/sync-jobs/:id/events 走 SSE
+ *   - 状态机：pending → running → success / failed / cancelled
+ *   - 失败自动重试（指数退避），超时强杀，防止僵尸任务
  */
-app.post("/api/courses/:courseId/sync", requireAuth, requireRole("teacher", "admin"), async (req, res, next) => {
-  const syncLog = [];
-  const log = (level, message, extra = {}) => {
-    syncLog.push({ level, message, time: new Date().toISOString().slice(11, 19), ...extra });
-  };
-  try {
-    const { courseId } = req.params;
-    const data = readData();
-    let course = data.courses.find((item) => item.id === courseId);
-
-    // 系统内没有这门课时：尝试从 Canvas 拉课程信息自动建课（仅真实模式可拉取）
-    if (!course && canvas.hasToken() && !canvas.MOCK_MODE) {
-      const { found, course: remote } = await canvas.getCourseInfo(courseId);
-      if (found) {
-        course = {
-          id: remote.id,
-          code: remote.code,
-          name: remote.name,
-          desc: remote.desc,
-          color: "blue",
-          count: 0,
-          progress: 0,
-          official: 0,            // 关键修复：official 映射到官方计数列，NOT NULL 必须给默认值
-          updates: "刚刚创建",
-          materials: [],
-        };
-        // 关键修复：新建的课程必须加入 data.courses，才能随 writeData 持久化
-        data.courses.push(course);
-      }
-    }
-    if (!course) return res.status(404).json({ error: "COURSE_NOT_FOUND", message: "课程不存在，且无法从 Canvas 拉取到课程信息以便自动创建" });
-
-    // 1) 采集（真实 API 或 mock 降级；兼容返回对象/数组两种结构）
-    log("info", `开始采集 Canvas 课程 ${courseId} 的资料`);
-    const raw = await canvas.collectCourseFiles(courseId);
-    const entries = Array.isArray(raw) ? raw : (raw.items || raw.entries || []);
-    log("info", `采集到 ${entries.length} 份原始资料`, { mode: raw.mode });
-
-    // 2) 逐条入库：判重 → 版本识别 → 生成提醒
-    const added = [];
-    const updated = [];
-    const skipped = [];
-    const now = new Date().toISOString().slice(0, 10).replaceAll("-", ".");
-
-    // 2.1) 下载渠道文件到本地 uploads/<courseId>/，把本地路径写入条目 filePath
-    const savedDir = path.join(__dirname, "uploads", String(courseId));
-    let downloaded = [];
-    try {
-      downloaded = await canvas.downloadCourseFiles(courseId, savedDir);
-    } catch (e) {
-      // 下载失败不阻断入库，仅记录
-      console.error("下载渠道文件失败:", e.message);
-    }
-    const byFileName = new Map(downloaded.map((d) => [d.fileName, d]));
-    log("info", `已下载 ${downloaded.length} 份资料文件到本地`);
-
-    for (const entry of entries) {
-      const dl = byFileName.get(entry.fileName);
-      if (dl) {
-        entry.filePath = dl.localPath;
-        entry.fileHash = dl.hash || entry.fileHash;
-        entry.fileSize = dl.fileSize ?? entry.fileSize;
-      }
-      const existing = findExistingMaterial(course, entry.name, entry.source);
-      if (existing) {
-        // 已存在的资料：若本地有文件且之前未记录路径，补上文件路径
-        if (dl && !existing.filePath) {
-          existing.filePath = dl.localPath;
-          existing.fileHash = existing.fileHash || dl.hash;
-          existing.fileSize = existing.fileSize ?? dl.fileSize;
-          updated.push(entry);
-          log("info", `补全资料文件路径: ${entry.name}`);
-        } else if (existing.version !== entry.version) {
-          existing.version = entry.version;
-          existing.date = entry.date || existing.date;
-          existing.fileHash = entry.fileHash || existing.fileHash;
-          existing.fileName = entry.fileName || existing.fileName;
-          existing.fileSize = entry.fileSize ?? existing.fileSize;
-          updated.push(entry);
-          log("info", `检测到版本变更，升级为 ${entry.version}: ${entry.name}`);
-        } else {
-          skipped.push(entry);
-          log("info", `跳过重复资料: ${entry.name} ${entry.version}`);
-        }
-        continue;
-      }
-      const material = normalizeMaterial({
-        name: entry.name,
-        type: entry.type || "课件",
-        source: entry.source || "Canvas",
-        version: entry.version || "V1.0",
-        date: entry.date || now,
-        fileHash: entry.fileHash || null,
-        fileName: entry.fileName || null,
-        fileSize: entry.fileSize ?? null,
-        filePath: entry.filePath || null,
-        versionChainId: crypto.randomUUID(),
-      });
-      // 若有可比较的文本，尝试版本识别（与上传接口逻辑对齐）
-      if (entry.text) {
-        material.extractedText = { text: entry.text, structure: { headings: 0, characters: entry.text.length, words: entry.text.split(/\s+/).length } };
-      }
-      course.materials.unshift(material);
-      course.count += 1;
-      course.updates = "刚刚更新";
-      if (material.status === "official") course.official += 1;
-      added.push(material);
-      log("info", `新增资料: ${material.name} (${material.version})`);
-    }
-
-    // 3) 若没有任何新增/更新，不写库
-    if (added.length + updated.length > 0) {
-      applyAuthority(data.courses);
-      data.alerts.unshift({
-        title: `已从 Canvas 同步 ${course.name}`,
-        desc: `新增 ${added.length} 份资料${updated.length ? `，更新 ${updated.length} 份` : ""}${skipped.length ? `，跳过 ${skipped.length} 份重复` : ""}`,
-        time: "刚刚",
-        course: course.name,
-        unread: true
-      });
-      writeData(data);
-    }
-    log("info", `同步完成: 新增 ${added.length}，更新 ${updated.length}，跳过 ${skipped.length}`);
-
-    res.json({
-      mode: canvas.hasToken() && !canvas.MOCK_MODE ? "live" : "mock",
-      course: course.id,
-      added: added.length,
-      updated: updated.length,
-      skipped: skipped.length,
-      syncLog,
-      items: added.map((m) => ({ id: m.id, name: m.name, type: m.type, version: m.version, status: m.status, source: m.source, date: m.date }))
-    });
-  } catch (err) {
-    next(err);
+function jobLog(jobId, level, message, extra = null) {
+  appendSyncJobLog(jobId, level, message, extra || null);
+  if (syncEngine) {
+    syncEngine.emitProgress(jobId, { level, message, ...(extra || {}) });
   }
+}
+app.post('/api/courses/:courseId/sync', requireAuth, requireRole('teacher', 'admin'), async (req, res, next) => {
+  try {
+    const courseId = String(req.params.courseId);
+    const job = createSyncJob({ courseId, scope: 'course', createdBy: req.user.id });
+    syncEngine.enqueueSyncJob(job.id);
+    res.status(202).json({ job });
+  } catch (err) { next(err); }
+});
+app.post('/api/sync-jobs', requireAuth, requireRole('admin'), async (req, res, next) => {
+  try {
+    const scope = String((req.body && req.body.scope) || 'global');
+    const job = createSyncJob({ courseId: null, scope, createdBy: req.user.id });
+    syncEngine.enqueueSyncJob(job.id);
+    res.status(202).json({ job });
+  } catch (err) { next(err); }
+});
+app.get('/api/sync-jobs', requireAuth, async (req, res, next) => {
+  try {
+    const jobs = listSyncJobs({ user: req.user });
+    res.json({ jobs });
+  } catch (err) { next(err); }
+});
+app.get('/api/sync-jobs/:id', requireAuth, async (req, res, next) => {
+  try {
+    const job = getSyncJob(req.params.id);
+    if (!job) return res.status(404).json({ error: 'SYNC_JOB_NOT_FOUND', message: '同步任务不存在' });
+    const access = requireSyncJobAccess(job, req.user);
+    if (!access.ok) return res.status(access.status).json({ error: access.error, message: access.message });
+    res.json({ job });
+  } catch (err) { next(err); }
+});
+app.get('/api/sync-jobs/:id/logs', requireAuth, async (req, res, next) => {
+  try {
+    const job = getSyncJob(req.params.id);
+    if (!job) return res.status(404).json({ error: 'SYNC_JOB_NOT_FOUND', message: '同步任务不存在' });
+    const access = requireSyncJobAccess(job, req.user);
+    if (!access.ok) return res.status(access.status).json({ error: access.error, message: access.message });
+    res.json({ logs: getSyncJobLogs(req.params.id, { after: Number(req.query.after || 0) }) });
+  } catch (err) { next(err); }
+});
+app.get('/api/sync-jobs/:id/events', async (req, res, next) => {
+  try {
+    const job = getSyncJob(req.params.id);
+    if (!job) return res.status(404).end();
+    const access = requireSyncJobAccess(job, req.user);
+    if (!access.ok) return res.status(access.status).json({ error: access.error, message: access.message });
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders();
+    res.write('retry: 2000\n\n');
+    res.write('data: ' + JSON.stringify({ job, logs: getSyncJobLogs(req.params.id).slice(-20) }) + '\n\n');
+    const eventName = syncEngine.progressEvent(req.params.id);
+    const listener = (payload) => res.write('data: ' + JSON.stringify(payload) + '\n\n');
+    syncEngine.listen(eventName, listener);
+    const heartbeat = setInterval(() => res.write(': ping\n\n'), 15000);
+    req.on('close', () => { clearInterval(heartbeat); syncEngine.removeListener(eventName, listener); });
+  } catch (err) { next(err); }
 });
 
 app.put("/api/alerts/read", requireAuth, async (req, res, next) => {
