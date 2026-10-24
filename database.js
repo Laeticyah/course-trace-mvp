@@ -195,6 +195,8 @@ db.exec(`
   ensureColumn("materials", "retracted", "INTEGER NOT NULL DEFAULT 0");
   ensureColumn("materials", "retracted_at", "TEXT");
   ensureColumn("materials", "retracted_by", "TEXT");
+  // 可信度系统：内容完整度 0~1（默认 0.5=未知）
+  ensureColumn("materials", "completeness", "REAL DEFAULT 0.5");
   // 搜索文档
   ensureColumn("search_documents", "material_name", "TEXT");
   ensureColumn("search_documents", "course_id", "TEXT");

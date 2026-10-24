@@ -161,6 +161,7 @@ function parseDate(value){
 }
 
 function calculateAuthority(material, chain){
+  // —— 五因子可信度加权（来源×35% + 时间×20% + 变更×15% + 审核×20% + 完整度×10%）
   const sourceScore = sourceAuthority[material.source] ?? 0.35;
   const newest = Math.max(...chain.map(item => parseDate(item.date).getTime()), Date.now());
   const ageDays = Math.max(0, (newest - parseDate(material.date).getTime()) / 86400000);
@@ -169,13 +170,37 @@ function calculateAuthority(material, chain){
   const changeScore = material.extractedText
     ? Math.min(1, Math.max(0.1, 1 - similarity))
     : 0.55;
-  const score = sourceScore * 0.5 + freshnessScore * 0.3 + changeScore * 0.2;
+
+  // 教师审核因子：approved → 1，否则 0（默认 pending=0 → 不加分也不扣分）
+  const reviewScore = material.reviewStatus === "approved" ? 1 : 0;
+  // 内容完整度因子：显式提供则用，否则按文件大小粗略估计（≥100KB→1）
+  const rawComplete = clamp01(material.completeness);
+  const completenessScore = material.completeness != null
+    ? rawComplete
+    : material.fileSize ? Math.min(1, Math.max(0.2, material.fileSize / (100 * 1024))) : 0.35;
+
+  const parts = {
+    source: { score: sourceScore, weight: 0.35, label: "来源权威度", detail: `来自 ${material.source}，可信度 ${Math.round(sourceScore * 100)}%` },
+    freshness: { score: freshnessScore, weight: 0.20, label: "时间新度", detail: ageDays < 1 ? "今天更新" : `${Math.round(ageDays)} 天前更新` },
+    change: { score: changeScore, weight: 0.15, label: "内容变更度", detail: `与上一版本相似度 ${Math.round(similarity * 100)}%` },
+    review: { score: reviewScore, weight: 0.20, label: "教师审核", detail: reviewScore ? "已确认，+20%" : "待确认，无加分" },
+    completeness: { score: completenessScore, weight: 0.10, label: "内容完整度", detail: material.fileSize ? `文件 ${(material.fileSize / 1024).toFixed(0)}KB，约 ${Math.round(completenessScore * 100)}% 完整` : "未提供文件，估测 35%" },
+  };
+
+  const score = Object.values(parts).reduce((sum, p) => sum + p.score * p.weight, 0);
+
   return {
     score: Number(score.toFixed(3)),
-    source: Number(sourceScore.toFixed(3)),
-    freshness: Number(freshnessScore.toFixed(3)),
-    change: Number(changeScore.toFixed(3))
+    parts,
+    breakdown: Object.values(parts)
+      .map(p => ({ label: p.label, value: Number((p.score * p.weight).toFixed(3)), detail: p.detail }))
+      .sort((a, b) => b.value - a.value),
   };
+}
+
+function clamp01(x){
+  if (x == null || Number.isNaN(Number(x))) return 0.5;
+  return Math.min(1, Math.max(0, Number(x)));
 }
 
 function applyAuthority(courses){
