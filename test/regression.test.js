@@ -173,6 +173,15 @@ describe("课脉核心功能回归", () => {
 
 // Stage3: 数据模型升级 —— 新表迁移幂等 + helper CRUD
 describe("数据模型升级（material_files / material_reviews / material_changes / audit_logs / search_documents）", () => {
+  // 测试数据清理：确保每次运行前清理上一次运行遗留的同名测试数据，避免累积污染生产库
+  function cleanupTestData(db) {
+    db.db.prepare("DELETE FROM materials WHERE name LIKE '测试附件%'").run();
+    db.db.prepare("DELETE FROM material_files WHERE file_name LIKE '%-测试附件.pdf'").run();
+    db.db.prepare("DELETE FROM material_reviews WHERE note = '内容合规'").run();
+    db.db.prepare("DELETE FROM material_changes WHERE old_value = '测试附件.pdf'").run();
+    db.db.prepare("DELETE FROM search_documents WHERE title LIKE '%测试附件%'").run();
+  }
+
   it("迁移已执行且幂等（重复加载 database 不会报错）", async () => {
     const db1 = require("../database.js");
     const db2 = require("../database.js");
@@ -185,23 +194,27 @@ describe("数据模型升级（material_files / material_reviews / material_chan
 
   it("material_files 增删改查 & 关联版本", async () => {
     const db = require("../database.js");
+    cleanupTestData(db);
     const data = db.readData();
     const course = data.courses[0];
     const material = (course.materials || [])[0];
     assert.ok(material, "应存在示例资料");
+    // 使用唯一 ID 保证本机测试与历史遗留脏数据隔离
+    const testId = "test-" + Date.now();
     const files = db.addMaterialFile({
       materialId: material.id,
-      fileName: "测试附件.pdf",
+      fileName: testId + "-测试附件.pdf",
       fileSize: 12345,
-      filePath: "uploads/test/测试附件.pdf",
+      filePath: testId + "/uploads/test/测试附件.pdf",
       fileHash: "abc123",
     });
     assert.ok(Array.isArray(files), "addMaterialFile 返回文件列表数组");
-    assert.ok(files.some((f) => f.fileName === "测试附件.pdf"), "文件应能被查询到");
+    assert.ok(files.some((f) => f.fileName === testId + "-测试附件.pdf"), "文件应能被查询到");
     const all = db.getMaterialFiles(material.id);
     assert.ok(Array.isArray(all) && all.length > 0, "getMaterialFiles 返回非空列表");
-    const target = all.find((f) => f.fileName === "测试附件.pdf");
+    const target = all.find((f) => f.fileName === testId + "-测试附件.pdf");
     assert.ok(target && target.filePath !== null, "新增文件应有 filePath");
+    assert.ok(target.filePath.includes("uploads/test/"), "新增文件 path 应为非空路径");
     // 归档后 filePath 不应丢失（保留以便恢复访问）
     db.setMaterialFileArchived(target.id, true);
     const archived = db.getMaterialFiles(material.id).find((f) => f.id === target.id);

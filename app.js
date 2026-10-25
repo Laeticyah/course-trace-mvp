@@ -40,10 +40,38 @@ function renderCourseCards(){
 function renderAlerts(){
   $("#alert-list").innerHTML = alerts.slice(0,3).map(a => `<div class="alert-item"><span class="alert-marker"></span><div><strong>${a.title}</strong><p>${a.desc}</p><time>${a.time}</time></div></div>`).join("");
   $("#alert-timeline").innerHTML = alerts.map(a => `<div class="page-alert ${a.unread ? "unread":""}"><span class="alert-marker"></span><div><strong>${a.title}</strong><p>${a.desc}</p></div><time>${a.time}</time></div>`).join("");
+  // 从真实数据刷新提醒计数
+  $("#nav-alert-count").textContent = alerts.filter(a => a.unread !== false).length;
+  $("#alert-count").textContent = alerts.length;
 }
 function renderCourseList(){
   $("#course-list").innerHTML = courses.map(c => `<div class="course-list-item ${selectedCourse===c.id?"selected":""}" data-select-course="${c.id}">${courseDot(c.color)}<div><strong>${c.name}</strong><small>${c.count} 份资料 · ${c.official} 份官方</small></div></div>`).join("");
+  $("#course-count").textContent = courses.length + " 门";
+  syncSidebarStats();
   renderCourseDetail();
+}
+
+/* 从真实数据刷新侧边栏统计（课程数、资料总数、提醒数、归档数） */
+function syncSidebarStats(){
+  var totalMaterials = courses.reduce(function(sum, c){ return sum + (c.count || (c.materials||[]).length); }, 0);
+  var archived = courses.reduce(function(sum, c){ return sum + (c.materials||[]).filter(function(m){ return m.status === "archived"; }).length; }, 0);
+  var map = {
+    "#sidebar-course-count": courses.length,
+    "#sidebar-materials-count": totalMaterials,
+    "#sidebar-alerts-count": alerts.length,
+    "#sidebar-archived-count": archived
+  };
+  Object.keys(map).forEach(function(sel){
+    var el = document.querySelector(sel);
+    if (el) el.textContent = map[sel];
+  });
+  // 通用 data-count 属性刷新
+  document.querySelectorAll("[data-count]").forEach(function(el){
+    var key = el.getAttribute("data-count");
+    if (key === "materials") el.textContent = totalMaterials;
+    if (key === "courses") el.textContent = courses.length;
+    if (key === "alerts") el.textContent = alerts.length;
+  });
 }
 function renderCourseDetail(){
   const c = courses.find(x => x.id === selectedCourse) || courses[0];

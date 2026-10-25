@@ -24,9 +24,9 @@
         <nav class="main-nav" aria-label="主导航">
           <button class="nav-item active" data-view="overview"><span class="nav-icon">⌂</span>资料总览</button>
           <button class="nav-item" data-view="courses"><span class="nav-icon">▦</span>我的课程</button>
-          <button class="nav-item" data-view="alerts"><span class="nav-icon">◉</span>变更提醒 <em>3</em></button>
+          <button class="nav-item" data-view="alerts"><span class="nav-icon">◉</span>变更提醒 <em data-count id="nav-alert-count">0</em></button>
           <button class="nav-item" data-view="archive"><span class="nav-icon">↺</span>历史归档</button>
-          <button class="nav-item" id="nav-admin" data-view="admin" hidden><span class="nav-icon">➤</span>管理后台</button>
+          <button class="nav-item" id="nav-admin" data-view="admin" data-role-admin hidden><span class="nav-icon">➤</span>管理后台</button>
         </nav>
         <div class="sidebar-section">
           <div class="section-label">我的课程 <button id="add-course" title="添加课程">＋</button></div>
@@ -77,7 +77,7 @@
               <div id="course-cards" class="course-cards"></div>
             </section>
             <aside class="section-block alert-section">
-              <div class="section-heading"><div><span class="tiny-label">LATEST UPDATES</span><h2>需要你留意</h2></div><span class="count-badge">3</span></div>
+              <div class="section-heading"><div><span class="tiny-label">LATEST UPDATES</span><h2>需要你留意</h2></div><span class="count-badge" data-count id="alert-count" data-source="alerts">0</span></div>
               <div id="alert-list" class="alert-list"></div>
               <button class="outline-button full-width" data-view-target="alerts">查看全部提醒 <span>→</span></button>
             </aside>
@@ -85,20 +85,20 @@
         </section>
 
         <section id="courses-view" class="view">
-          <div class="page-intro"><div><span class="tiny-label">COURSE LIBRARY</span><h1>我的课程</h1><p>按课程沉淀资料，保留每次更新的来路与版本。</p></div><button class="primary-button" id="add-material">＋ 添加资料</button></div>
+          <div class="page-intro"><div><span class="tiny-label">COURSE LIBRARY</span><h1>我的课程</h1><p>按课程沉淀资料，保留每次更新的来路与版本。</p></div><button class="primary-button" id="add-material" data-role-admin>＋ 添加资料</button></div>
           <div class="course-workspace">
-            <div class="course-list-panel"><div class="panel-title">本学期课程 <span>3 门</span></div><div id="course-list"></div></div>
+            <div class="course-list-panel"><div class="panel-title">本学期课程 <span id="sidebar-course-count" data-count="courses">0 门</span></div><div id="course-list"></div></div>
             <div class="course-detail-panel" id="course-detail"></div>
           </div>
         </section>
 
         <section id="alerts-view" class="view">
-          <div class="page-intro"><div><span class="tiny-label">CHANGELOG</span><h1>变更提醒</h1><p>官方资料有更新时，第一时间知道该看哪一版。</p></div><button class="outline-button" id="mark-read">全部标为已读</button></div>
+          <div class="page-intro"><div><span class="tiny-label">CHANGELOG</span><h1>变更提醒</h1><p>官方资料有更新时，第一时间知道该看哪一版。</p><span class="count-badge" data-count id="alert-total-count">0</span></div><button class="outline-button" id="mark-read">全部标为已读</button></div>
           <div class="alert-page-grid"><div class="alert-timeline" id="alert-timeline"></div><div class="reminder-card"><div class="reminder-icon">✦</div><h3>提醒策略</h3><p>刚性资料变更会主动提醒；学生整理类资料只在你主动检索时展示，减少无效打扰。</p><div class="reminder-row"><span>官方课件更新</span><b class="toggle on"></b></div><div class="reminder-row"><span>作业要求变更</span><b class="toggle on"></b></div><div class="reminder-row"><span>学生笔记更新</span><b class="toggle"></b></div></div></div>
         </section>
 
         <section id="archive-view" class="view">
-          <div class="page-intro"><div><span class="tiny-label">VERSION ARCHIVE</span><h1>历史归档</h1><p>所有被替代的版本都可回溯，资料不会随群消息消失。</p></div><div class="archive-stat"><strong>73</strong><span>份已治理资料</span></div></div>
+          <div class="page-intro"><div><span class="tiny-label">VERSION ARCHIVE</span><h1>历史归档</h1><p>所有被替代的版本都可回溯，资料不会随群消息消失。</p></div><div class="archive-stat"><strong data-count id="archive-count">0</strong><span>份已治理资料</span></div></div>
           <div class="archive-table"><div class="table-head"><span>资料名称</span><span>课程 / 章节</span><span>版本</span><span>状态</span><span>更新时间</span></div><div id="archive-rows"></div></div>
         </section>
 
@@ -106,7 +106,7 @@
           <div class="page-intro"><div><span class="tiny-label">ADMIN CONSOLE</span><h1>管理后台</h1><p>资料审核、生命周期与治理统计的集中控制台。</p></div>
             <div class="admin-header-actions">
               <button class="outline-button" id="admin-export">导出数据</button>
-              <button class="primary-button" id="admin-open-add">＋ 添加资料</button>
+              <button class="primary-button" id="admin-open-add" data-role-admin>＋ 添加资料</button>
             </div>
           </div>
           <div class="admin-stats" id="admin-stats"></div>
@@ -223,8 +223,17 @@
       </div>
     </div>
     <div class="toast" id="toast"><span>✓</span><p></p></div>
+    <div class="mobile-shell" data-mobile-tabs></div>
+    <div id="login-hint" class="login-hint" hidden>
+      <div class="login-hint-card">
+        <span class="login-hint-icon">⌂</span>
+        <p>你还未登录，只能浏览演示数据。</p>
+        <button class="primary-button" data-open-login>去登录</button>
+      </div>
+    </div>
     <script src="mock-data.js"></script>
     <script src="app.js"></script>
     <script src="enhancements.js"></script>
+    <script src="ux-polish.js"></script>
   </body>
 </html>
