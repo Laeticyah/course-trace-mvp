@@ -441,17 +441,51 @@ $$("[data-close-modal]").forEach(b=>b.addEventListener("click",()=>{ if(b.closes
 $("#material-modal").addEventListener("click",e=>{if(e.target.id==="material-modal")closeModal();});
 $("#material-form").addEventListener("submit", async e=>{
   e.preventDefault();
-  const formData=new FormData(e.target);
-  const endpoint=formData.get("file")?.size?"/api/materials/upload":"/api/materials";
-  const options={method:"POST",body:endpoint.endsWith("upload")?formData:JSON.stringify(Object.fromEntries(formData)),headers:authHeaders()};
-  if(!endpoint.endsWith("upload")) options.headers=authHeaders({"Content-Type":"application/json"});
+  const form = e.target;
+  const formData = new FormData(form);
+  const files = (formData.getAll("file") || []).filter(file => file && file.size > 0);
+  const url = String(formData.get("url") || "").trim();
+  const payload = Object.fromEntries(formData.entries());
+  delete payload.file;
+  delete payload.url;
   try {
-    const response=await fetch(endpoint,options);
-    const result=await response.json();
-    if(response.status===401||response.status===403){closeModal();openLogin();return;}
-    if(!response.ok){showToast(result.message||"资料保存失败");return;}
-    showToast("资料已加入资料库，内容指纹已生成 ✓");
+    let response;
+    if(url){
+      response = await fetch("/api/import/url", {
+        method: "POST",
+        headers: authHeaders({"Content-Type":"application/json"}),
+        body: JSON.stringify({ ...payload, url })
+      });
+      const result = await response.json();
+      if(response.status===401||response.status===403){closeModal();openLogin();return;}
+      if(!response.ok){showToast(result.message||"链接导入失败");return;}
+      showToast(result.duplicate ? "链接文件已存在，未重复创建版本" : "链接资料已导入，内容指纹已生成 ✓");
+    } else if(files.length){
+      const batch = new FormData();
+      for(const key of ["name","course","type","source"]) batch.append(key, payload[key] || "");
+      for(const file of files) batch.append("files", file, file.name);
+      response = await fetch("/api/materials/upload-batch", { method: "POST", headers: authHeaders(), body: batch });
+      const result = await response.json();
+      if(response.status===401||response.status===403){closeModal();openLogin();return;}
+      if(!response.ok){showToast(result.message||"资料保存失败");return;}
+      const items = result.results || [];
+      const imported = items.filter(item => !item.error && !item.duplicate).length;
+      const duplicated = items.filter(item => item.duplicate).length;
+      const failed = items.filter(item => item.error).length;
+      showToast(`已导入 ${imported} 份资料${duplicated ? "，跳过重复 " + duplicated + " 份" : ""}${failed ? "，失败 " + failed + " 份" : ""} ✓`);
+    } else {
+      response = await fetch("/api/materials", {
+        method: "POST",
+        headers: authHeaders({"Content-Type":"application/json"}),
+        body: JSON.stringify(payload)
+      });
+      const result = await response.json();
+      if(response.status===401||response.status===403){closeModal();openLogin();return;}
+      if(!response.ok){showToast(result.message||"资料保存失败");return;}
+      showToast("资料已登记并生成内容指纹 ✓");
+    }
     closeModal();
+    form.reset();
     await loadFromApi();
   }catch(error){
     showToast(error.message||"资料保存失败");

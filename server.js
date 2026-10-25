@@ -1,6 +1,9 @@
 const express = require("express");
 const fs = require("node:fs/promises");
 const path = require("node:path");
+const os = require("node:os");
+const net = require("node:net");
+const dns = require("node:dns/promises");
 const crypto = require("node:crypto");
 const { execFile } = require("node:child_process");
 const { promisify } = require("node:util");
@@ -21,6 +24,7 @@ const {
 const syncEngine = require("./sync-engine");
 const { normalizeMaterial } = require("./lib/material");
 const { applyAuthority } = require("./lib/authority");
+const sources = require("./lib/sources");
 
 const app = express();
 const port = Number(process.env.PORT || 4173);
@@ -85,6 +89,176 @@ function resolveUploadPath(filePath){
   return null;
 }
 
+/* --------------------- 资料导入（多渠道共用） --------------------- */
+
+const REMOTE_MAX_BYTES = 25 * 1024 * 1024;
+const REMOTE_ALLOWED_EXT = new Set([".pdf", ".ppt", ".pptx", ".doc", ".docx", ".txt", ".md", ".zip"]);
+
+function requireKnownSource(source, res) {
+  const normalized = sources.normalizeSource(source, null);
+  if (!normalized) {
+    res.status(400).json({ error: "INVALID_SOURCE", message: "不支持的资料来源，请使用 /api/sources 中的来源" });
+    return null;
+  }
+  return normalized;
+}
+
+async function storeUploadedFile(courseId, tempPath, originalName) {
+  const courseUploadDir = path.join(uploadDir, String(courseId));
+  await fs.mkdir(courseUploadDir, { recursive: true });
+  const storedName = `${Date.now()}-${crypto.randomBytes(4).toString("hex")}-${sanitizeFileName(originalName)}`;
+  const storedPath = path.join(courseUploadDir, storedName);
+  try {
+    await fs.rename(tempPath, storedPath);
+  } catch (moveError) {
+    await fs.copyFile(tempPath, storedPath);
+    await fs.rm(tempPath, { force: true });
+  }
+  return storedPath;
+}
+
+/**
+ * 把一个临时文件纳入课程资料库：SHA-256 判重 → 版本链识别 → 旧版归档 → 落盘 → 写库。
+ * 上传、批量上传、链接导入、目录导入共用这一条链路。
+ */
+async function ingestMaterialFile({ data, course, name, type, source, tempPath, originalName }) {
+  const fileHash = await sha256(tempPath);
+  const features = await extractDocumentFeatures(tempPath, originalName);
+  const duplicate = data.courses
+    .flatMap((item) => item.materials)
+    .find((item) => item.fileHash === fileHash);
+  if (duplicate) {
+    await fs.rm(tempPath, { force: true }).catch(() => {});
+    return { duplicate: true, material: duplicate };
+  }
+
+  const candidates = course.materials
+    .filter((item) => item.type === type && item.extractedText)
+    .map((item) => ({ item, score: similarityScore(features, item.extractedText) }))
+    .sort((a, b) => b.score - a.score);
+  const related = candidates[0]?.score >= 0.55 ? candidates[0] : null;
+  const versionChainId = related?.item.versionChainId
+    || course.materials.find((item) => item.name === name && item.type === type)?.versionChainId
+    || crypto.randomUUID();
+
+  archivePreviousVersions(course, versionChainId);
+  const storedPath = await storeUploadedFile(course.id, tempPath, originalName);
+  try {
+    const material = normalizeMaterial({
+      name, type, source, fileHash,
+      fileName: originalName,
+      fileSize: (await fs.stat(storedPath)).size,
+      versionChainId,
+      filePath: path.relative(__dirname, storedPath)
+    });
+    material.version = nextVersion(course.materials, name, type);
+    material.extractedText = features;
+    material.similarity = related ? Number(related.score.toFixed(3)) : null;
+    material.versionReason = related
+      ? `与 ${related.item.version} 内容相似度 ${(related.score * 100).toFixed(1)}%，归入同一版本链`
+      : "未发现相似历史资料，创建新的版本链";
+    course.materials.unshift(material);
+    course.count += 1;
+    course.updates = "刚刚更新";
+    if (material.status === "official") course.official += 1;
+    data.alerts.unshift({
+      title: `${course.name} · ${material.name}已导入`,
+      desc: `${material.source}来源，${material.version} 已加入版本链。SHA-256：${fileHash.slice(0, 12)}…`,
+      time: "刚刚", course: course.name, unread: true
+    });
+    applyAuthority(data.courses);
+    writeData(data);
+    return { duplicate: false, material, features };
+  } catch (error) {
+    await fs.rm(storedPath, { force: true }).catch(() => {});
+    throw error;
+  }
+}
+
+function isPrivateAddress(address) {
+  if (net.isIPv4(address)) {
+    const parts = address.split(".").map(Number);
+    return parts[0] === 0 || parts[0] === 10 || parts[0] === 127
+      || (parts[0] === 169 && parts[1] === 254)
+      || (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31)
+      || (parts[0] === 192 && parts[1] === 168);
+  }
+  if (net.isIPv6(address)) {
+    const lower = address.toLowerCase();
+    return lower === "::1" || lower === "::" || lower.startsWith("fc") || lower.startsWith("fd") || lower.startsWith("fe80");
+  }
+  return true;
+}
+
+/** 链接导入的安全校验：只允许 http(s)，默认禁止内网/本机地址与重定向绕过 */
+async function assertRemoteUrlAllowed(rawUrl) {
+  let url;
+  try { url = new URL(String(rawUrl)); } catch (_) { throw Object.assign(new Error("INVALID_URL"), { status: 400 }); }
+  if (!["http:", "https:"].includes(url.protocol)) throw Object.assign(new Error("INVALID_URL"), { status: 400 });
+
+  const allowHosts = String(process.env.IMPORT_ALLOW_PRIVATE_HOSTS || "")
+    .split(",").map((item) => item.trim()).filter(Boolean);
+  const host = url.hostname;
+  if (allowHosts.includes(host) || allowHosts.includes(`${host}:${url.port || ""}`)) return url;
+  if (host === "localhost" || host.endsWith(".localhost")) {
+    throw Object.assign(new Error("PRIVATE_ADDRESS_BLOCKED"), { status: 400 });
+  }
+  let addresses;
+  try {
+    addresses = net.isIP(host) ? [{ address: host }] : await dns.lookup(host, { all: true });
+  } catch (_) {
+    throw Object.assign(new Error("DNS_LOOKUP_FAILED"), { status: 400 });
+  }
+  if (!addresses.length) throw Object.assign(new Error("DNS_LOOKUP_FAILED"), { status: 400 });
+  if (addresses.some((item) => isPrivateAddress(item.address))) {
+    throw Object.assign(new Error("PRIVATE_ADDRESS_BLOCKED"), { status: 400 });
+  }
+  return url;
+}
+
+async function downloadRemoteFile(rawUrl) {
+  let current = String(rawUrl);
+  for (let hop = 0; hop < 4; hop++) {
+    const url = await assertRemoteUrlAllowed(current);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 30000);
+    let response;
+    try {
+      response = await fetch(url, { redirect: "manual", signal: controller.signal });
+    } catch (_) {
+      throw Object.assign(new Error("REMOTE_FETCH_FAILED"), { status: 400 });
+    } finally {
+      clearTimeout(timer);
+    }
+    if ([301, 302, 303, 307, 308].includes(response.status)) {
+      const location = response.headers.get("location");
+      if (!location) throw Object.assign(new Error("REMOTE_REDIRECT_INVALID"), { status: 400 });
+      current = new URL(location, url).toString();
+      continue;
+    }
+    if (!response.ok) throw Object.assign(new Error("REMOTE_HTTP_" + response.status), { status: 400 });
+    const contentLength = Number(response.headers.get("content-length") || 0);
+    if (contentLength > REMOTE_MAX_BYTES) throw Object.assign(new Error("REMOTE_FILE_TOO_LARGE"), { status: 400 });
+    if (!response.body) throw Object.assign(new Error("REMOTE_EMPTY_BODY"), { status: 400 });
+    const reader = response.body.getReader();
+    const chunks = [];
+    let total = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.length;
+      if (total > REMOTE_MAX_BYTES) {
+        try { await reader.cancel(); } catch (_) { /* ignore */ }
+        throw Object.assign(new Error("REMOTE_FILE_TOO_LARGE"), { status: 400 });
+      }
+      chunks.push(Buffer.from(value));
+    }
+    if (!total) throw Object.assign(new Error("REMOTE_EMPTY_BODY"), { status: 400 });
+    return { buffer: Buffer.concat(chunks), contentType: response.headers.get("content-type") || "" };
+  }
+  throw Object.assign(new Error("TOO_MANY_REDIRECTS"), { status: 400 });
+}
+
 function nextVersion(materials, name, type){
   const versions = materials
     .filter(item => item.name === name && item.type === type)
@@ -132,13 +306,19 @@ async function extractOfficeText(filePath, extension){
 async function extractDocumentFeatures(filePath, originalName = filePath){
   const extension = path.extname(originalName).toLowerCase();
   let text = "";
-  if(extension === ".pdf"){
-    const parsed = await pdfParse(await fs.readFile(filePath));
-    text = parsed.text;
-  } else if(extension === ".docx" || extension === ".pptx"){
-    text = await extractOfficeText(filePath, extension);
-  } else if(extension === ".txt"){
-    text = await fs.readFile(filePath, "utf8");
+  try {
+    if(extension === ".pdf"){
+      const parsed = await pdfParse(await fs.readFile(filePath));
+      text = parsed.text;
+    } else if(extension === ".docx" || extension === ".pptx"){
+      text = await extractOfficeText(filePath, extension);
+    } else if(extension === ".txt" || extension === ".md"){
+      text = await fs.readFile(filePath, "utf8");
+    }
+  } catch (error) {
+    // 附件损坏或格式不标准时不让整次导入失败：按“无文本”入库，仍可用文件名/哈希治理
+    console.warn("[extract] 文档解析失败，按无文本处理:", extension, error.message);
+    text = "";
   }
   return { text: normalizeText(text), textHash: textFingerprint(text), structure: structureFeatures(text) };
 }
@@ -271,6 +451,7 @@ app.get("/api/search", requireAuth, (req, res, next) => {
     const q = String(req.query.q || "").trim();
     const courseId = String(req.query.course_id || "").trim() || undefined;
     const type = String(req.query.type || "").trim() || undefined;
+    const source = String(req.query.source || "").trim() || undefined;
     const limit = Math.min(Math.max(parseInt(req.query.limit) || 20, 1), 100);
 
     const user = currentUser(req);
@@ -282,7 +463,7 @@ app.get("/api/search", requireAuth, (req, res, next) => {
       allowedCourseIds = listUserCourses(user.id).map(c => c.id);
     }
 
-    const results = searchMaterials({ q, courseId, type, user, limit });
+    const results = searchMaterials({ q, courseId, type, source, user, limit });
 
     // 额外按课程权限过滤（学生无法访问未加入课程的搜索结果）
     let filtered = results;
@@ -291,7 +472,7 @@ app.get("/api/search", requireAuth, (req, res, next) => {
     }
 
     res.json({
-      query: { q, courseId, type, limit },
+      query: { q, courseId, type, source, limit },
       count: filtered.length,
       results: filtered
     });
@@ -453,6 +634,8 @@ app.post("/api/materials", requireAuth, requireRole("teacher", "admin"), async (
   try {
     const { name, course: courseId, type, source } = req.body;
     if(!name || !courseId || !type || !source) return res.status(400).json({ error: "INVALID_MATERIAL", message: "name、course、type、source 均为必填项" });
+    const normalizedSource = requireKnownSource(source, res);
+    if(!normalizedSource) return;
     const data = readData();
     const course = data.courses.find(item => item.id === courseId);
     if(!course) return res.status(404).json({ error: "COURSE_NOT_FOUND", message: "课程不存在" });
@@ -460,7 +643,7 @@ app.post("/api/materials", requireAuth, requireRole("teacher", "admin"), async (
     const previous = course.materials.find(item => item.name === name && item.type === type);
     const versionChainId = previous ? previous.versionChainId : crypto.randomUUID();
     archivePreviousVersions(course, versionChainId);
-    const material = normalizeMaterial({ name, type, source, versionChainId });
+    const material = normalizeMaterial({ name, type, source: normalizedSource, versionChainId });
     material.version = nextVersion(course.materials, name, type);
     course.materials.unshift(material);
     course.count += 1;
@@ -481,13 +664,14 @@ app.post("/api/materials", requireAuth, requireRole("teacher", "admin"), async (
 });
 
 app.post("/api/materials/upload", requireAuth, requireRole("teacher", "admin"), upload.single("file"), async (req, res, next) => {
-  let storedFilePath = null;
   try {
-    const { name, course: courseId, type, source } = req.body;
+    const { name, course: courseId, type, source } = req.body || {};
     if(!name || !courseId || !type || !source || !req.file) {
       if(req.file) await fs.rm(req.file.path, { force: true });
       return res.status(400).json({ error: "INVALID_UPLOAD", message: "name、course、type、source 和 file 均为必填项" });
     }
+    const normalizedSource = requireKnownSource(source, res);
+    if(!normalizedSource) { await fs.rm(req.file.path, { force: true }); return; }
     const data = readData();
     const course = data.courses.find(item => item.id === courseId);
     if(!course) {
@@ -498,81 +682,167 @@ app.post("/api/materials/upload", requireAuth, requireRole("teacher", "admin"), 
       await fs.rm(req.file.path, { force: true });
       return;
     }
-    const fileHash = await sha256(req.file.path);
-    const features = await extractDocumentFeatures(req.file.path, req.file.originalname);
-    const duplicate = data.courses
-      .flatMap(item => item.materials)
-      .find(item => item.fileHash === fileHash);
-    if(duplicate) {
-      await fs.rm(req.file.path, { force: true });
-      return res.json({ duplicate: true, material: duplicate, message: "文件内容与已有资料完全一致" });
-    }
-    const candidates = course.materials
-      .filter(item => item.type === type && item.extractedText)
-      .map(item => ({ item, score: similarityScore(features, item.extractedText) }))
-      .sort((a, b) => b.score - a.score);
-    const related = candidates[0]?.score >= 0.55 ? candidates[0] : null;
-    const versionChainId = related?.item.versionChainId
-      || course.materials.find(item => item.name === name && item.type === type)?.versionChainId
-      || crypto.randomUUID();
-    // 新版本入库：同一版本链上的旧资料转为历史归档
-    archivePreviousVersions(course, versionChainId);
-    // 落盘到 uploads/<courseId>/，与下载路由保持一致（下载按资料 id 从库中取路径）
-    const courseUploadDir = path.join(uploadDir, String(courseId));
-    await fs.mkdir(courseUploadDir, { recursive: true });
-    const storedName = `${Date.now()}-${crypto.randomBytes(4).toString("hex")}-${sanitizeFileName(req.file.originalname)}`;
-    const storedPath = path.join(courseUploadDir, storedName);
-    try {
-      await fs.rename(req.file.path, storedPath);
-    } catch (moveError) {
-      await fs.copyFile(req.file.path, storedPath);
-      await fs.rm(req.file.path, { force: true });
-    }
-    storedFilePath = storedPath;
-    const material = normalizeMaterial({
-      name, type, source, fileHash, fileName: req.file.originalname,
-      fileSize: req.file.size, versionChainId, filePath: path.relative(__dirname, storedPath)
+    const result = await ingestMaterialFile({
+      data, course,
+      name: String(name).trim(), type, source: normalizedSource,
+      tempPath: req.file.path, originalName: req.file.originalname
     });
-    material.version = nextVersion(course.materials, name, type);
-    material.extractedText = features;
-    material.similarity = related ? Number(related.score.toFixed(3)) : null;
-    material.versionReason = related
-      ? `与 ${related.item.version} 内容相似度 ${(related.score * 100).toFixed(1)}%，归入同一版本链`
-      : "未发现相似历史资料，创建新的版本链";
-    course.materials.unshift(material);
-    course.count += 1;
-    course.updates = "刚刚更新";
-    if(material.status === "official") course.official += 1;
-    data.alerts.unshift({
-      title: `${course.name} · ${material.name}已上传`,
-      desc: `${material.source}来源，${material.version} 已加入版本链。SHA-256：${fileHash.slice(0, 12)}…`,
-      time: "刚刚", course: course.name, unread: true
-    });
-    applyAuthority(data.courses);
-    writeData(data);
+    if(result.duplicate) {
+      return res.json({ duplicate: true, material: result.material, message: "文件内容与已有资料完全一致" });
+    }
     res.status(201).json({
       course,
-      material: {
-        ...material,
-        extractedText: undefined
-      },
+      material: { ...result.material, extractedText: undefined },
       duplicate: false,
+      source: normalizedSource,
       analysis: {
-        textCharacters: features.structure.characters,
-        headings: features.structure.headings,
-        similarity: material.similarity,
-        versionReason: material.versionReason,
-        authorityScore: material.authorityScore,
-        authorityBreakdown: material.authorityBreakdown,
-        isAuthoritative: material.isAuthoritative
+        textCharacters: result.features.structure.characters,
+        headings: result.features.structure.headings,
+        similarity: result.material.similarity,
+        versionReason: result.material.versionReason,
+        authorityScore: result.material.authorityScore,
+        authorityBreakdown: result.material.authorityBreakdown,
+        isAuthoritative: result.material.isAuthoritative
       }
     });
   } catch(error) {
     if(req.file) await fs.rm(req.file.path, { force: true }).catch(() => {});
-    if(storedFilePath) await fs.rm(storedFilePath, { force: true }).catch(() => {});
     next(error);
   }
 });
+
+/** 批量上传：一次选多个文件（班级群/网盘下载的一批课件） */
+app.post("/api/materials/upload-batch", requireAuth, requireRole("teacher", "admin"), upload.array("files", 20), async (req, res, next) => {
+  try {
+    const { name, course: courseId, type, source } = req.body || {};
+    const files = req.files || [];
+    if(!courseId || !type || !source || files.length === 0) {
+      for(const file of files) await fs.rm(file.path, { force: true }).catch(() => {});
+      return res.status(400).json({ error: "INVALID_UPLOAD", message: "course、type、source 和 files 均为必填项" });
+    }
+    const normalizedSource = requireKnownSource(source, res);
+    if(!normalizedSource) {
+      for(const file of files) await fs.rm(file.path, { force: true }).catch(() => {});
+      return;
+    }
+    const data = readData();
+    const course = data.courses.find(item => item.id === courseId);
+    if(!course) {
+      for(const file of files) await fs.rm(file.path, { force: true }).catch(() => {});
+      return res.status(404).json({ error: "COURSE_NOT_FOUND", message: "课程不存在" });
+    }
+    if(!ensureCourseTeacher(req.user, courseId, res)) {
+      for(const file of files) await fs.rm(file.path, { force: true }).catch(() => {});
+      return;
+    }
+    const results = [];
+    for(const file of files) {
+      const baseName = path.parse(file.originalname).name;
+      const materialName = files.length === 1 && name
+        ? String(name).trim()
+        : (name ? String(name).trim() + " - " + baseName : baseName);
+      try {
+        const result = await ingestMaterialFile({
+          data, course,
+          name: materialName || baseName || "未命名资料",
+          type, source: normalizedSource,
+          tempPath: file.path, originalName: file.originalname
+        });
+        results.push(result.duplicate
+          ? { duplicate: true, fileName: file.originalname, materialId: result.material.id }
+          : { duplicate: false, fileName: file.originalname, materialId: result.material.id, version: result.material.version });
+      } catch (error) {
+        await fs.rm(file.path, { force: true }).catch(() => {});
+        results.push({ fileName: file.originalname, error: error.message || "导入失败" });
+      }
+    }
+    res.status(201).json({ results, source: normalizedSource });
+  } catch(error) {
+    if(Array.isArray(req.files)) {
+      for(const file of req.files) await fs.rm(file.path, { force: true }).catch(() => {});
+    }
+    next(error);
+  }
+});
+
+/** 链接导入：网盘/班级群分享直链 → 下载 → 判重 → 版本链（带 SSRF 防护） */
+app.post("/api/import/url", requireAuth, requireRole("teacher", "admin"), async (req, res, next) => {
+  let tempPath = null;
+  try {
+    const { course: courseId, url, name, type = "课件", source = "网盘" } = req.body || {};
+    if(!courseId || !url) {
+      return res.status(400).json({ error: "INVALID_IMPORT", message: "course 和 url 均为必填项" });
+    }
+    const normalizedSource = requireKnownSource(source, res);
+    if(!normalizedSource) return;
+    const data = readData();
+    const course = data.courses.find(item => item.id === courseId);
+    if(!course) return res.status(404).json({ error: "COURSE_NOT_FOUND", message: "课程不存在" });
+    if(!ensureCourseTeacher(req.user, courseId, res)) return;
+
+    let parsedUrl;
+    try { parsedUrl = new URL(String(url)); } catch (_) {
+      return res.status(400).json({ error: "INVALID_URL", message: "链接格式不正确" });
+    }
+    const guessedName = String(name || "").trim()
+      || decodeURIComponent((parsedUrl.pathname.split("/").pop() || ""))
+      || "链接资料";
+    const extension = path.extname(guessedName).toLowerCase();
+    if(!REMOTE_ALLOWED_EXT.has(extension)) {
+      return res.status(400).json({ error: "UNSUPPORTED_FILE_TYPE", message: "链接文件类型不支持：" + (extension || "未知") });
+    }
+
+    const remote = await downloadRemoteFile(url);
+    tempPath = path.join(os.tmpdir(), "ct-import-" + crypto.randomUUID() + extension);
+    await fs.writeFile(tempPath, remote.buffer);
+    const result = await ingestMaterialFile({
+      data, course,
+      name: path.basename(guessedName, path.extname(guessedName)) || "链接资料",
+      type, source: normalizedSource,
+      tempPath, originalName: sanitizeFileName(guessedName)
+    });
+    if(result.duplicate) {
+      return res.json({ duplicate: true, material: result.material, message: "链接文件与已有资料完全一致" });
+    }
+    res.status(201).json({
+      course,
+      material: { ...result.material, extractedText: undefined },
+      duplicate: false,
+      source: normalizedSource,
+      analysis: {
+        textCharacters: result.features.structure.characters,
+        headings: result.features.structure.headings,
+        similarity: result.material.similarity,
+        versionReason: result.material.versionReason,
+        authorityScore: result.material.authorityScore,
+        authorityBreakdown: result.material.authorityBreakdown,
+        isAuthoritative: result.material.isAuthoritative
+      }
+    });
+  } catch(error) {
+    if(error.status) {
+      const messages = {
+        INVALID_URL: "链接格式不正确",
+        PRIVATE_ADDRESS_BLOCKED: "该链接指向内网/本机地址，已拦截",
+        DNS_LOOKUP_FAILED: "链接域名解析失败",
+        REMOTE_FETCH_FAILED: "链接下载失败或超时",
+        REMOTE_FILE_TOO_LARGE: "链接文件超过 25MB 限制",
+        REMOTE_EMPTY_BODY: "链接文件为空",
+        TOO_MANY_REDIRECTS: "链接重定向次数过多"
+      };
+      return res.status(error.status).json({ error: error.message, message: messages[error.message] || "链接导入失败：" + error.message });
+    }
+    next(error);
+  } finally {
+    if(tempPath) await fs.rm(tempPath, { force: true }).catch(() => {});
+  }
+});
+
+/** 渠道注册表：前端来源下拉、筛选与可信度说明共用 */
+app.get("/api/sources", requireAuth, (_req, res) => {
+  res.json({ sources: sources.listChannels() });
+});
+
 
 /** 判重：检查采集的条目是否与库中已有资料重复（按名称+来源） */
 function findExistingMaterial(course, name, source) {

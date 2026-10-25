@@ -595,7 +595,7 @@ function syncFTSIndex() {
 }
 
 // FTS5 优先，失败时降级 LIKE 查询
-function searchMaterials({ q = "", courseId = "", type = "", user = null, limit = 50 }) {
+function searchMaterials({ q = "", courseId = "", type = "", source = "", user = null, limit = 50 }) {
   const where = [];
   const params = [];
 
@@ -610,6 +610,10 @@ function searchMaterials({ q = "", courseId = "", type = "", user = null, limit 
   if (type) {
     where.push(`m.type = ?`);
     params.push(type);
+  }
+  if (source) {
+    where.push(`m.source = ?`);
+    params.push(source);
   }
 
   if (q.trim()) {

@@ -36,10 +36,15 @@ async function startServer() {
       // 测试不访问真实 Canvas：置空 Token，让同步任务明确失败（成功链路用真实环境手工验证）
       CANVAS_TOKEN: "",
       CANVAS_BASE_URL: "http://127.0.0.1:1",
+      // 仅测试允许链接导入访问本机文件服务，生产默认禁止内网地址
+      IMPORT_ALLOW_PRIVATE_HOSTS: "127.0.0.1",
       NODE_ENV: "test"
     }
   });
-  if (serverProcess.stderr) serverProcess.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+  if (serverProcess.stderr) serverProcess.stderr.on("data", (chunk) => {
+    stderr += chunk.toString();
+    if (process.env.DEBUG_TEST_SERVER) console.error("[test-server]", chunk.toString().trim());
+  });
   if (serverProcess.stdout) serverProcess.stdout.on("data", () => {});
 
   const deadline = Date.now() + 20000;

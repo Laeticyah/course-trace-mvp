@@ -45,6 +45,21 @@ Invoke-RestMethod http://localhost:4173/api/courses/97558/sync -Method Post -Hea
 
 同步过程可在页面顶部「同步」按钮查看进度/日志；同步出的资料会带真实本地文件，可下载。
 
+## 资料来源渠道
+
+页面「添加资料」弹窗支持多渠道导入，渠道注册表见 `GET /api/sources`：
+
+| 渠道 | 来源标签 | 导入方式 | 默认可信度 |
+| --- | --- | --- | --- |
+| Canvas | Canvas | API 自动同步 | 1.00 |
+| 教师上传 | 教师上传 | 本地上传/登记（可多选） | 0.95 |
+| 知途好课 | 知途好课 | 手动下载后上传 | 0.92 |
+| 班级群 | 班级群 | 多文件批量上传 / 链接导入 | 0.58 |
+| 网盘 | 网盘 | 分享直链导入 | 0.48 |
+| 转发 | 转发 | 上传/登记 | 0.40 |
+
+链接导入的约束：只允许 http(s)、默认拦截本机/内网地址（SSRF 防护，可用 `IMPORT_ALLOW_PRIVATE_HOSTS` 为测试放行）、最大 25MB、文件类型白名单（pdf/ppt/pptx/doc/docx/txt/md/zip）。所有渠道最终都走同一条链路：SHA-256 判重 → 版本链识别 → 旧版自动归档 → 可信度重算。
+
 ## 接口
 
 | 方法 | 路径 | 作用 |
@@ -53,8 +68,11 @@ Invoke-RestMethod http://localhost:4173/api/courses/97558/sync -Method Post -Hea
 | GET | `/api/dashboard` | 获取首页课程和提醒 |
 | GET | `/api/courses?q=工程` | 搜索课程 |
 | GET | `/api/courses/:courseId/materials` | 获取课程资料 |
-| POST | `/api/materials/upload` | 上传资料、计算 SHA-256、识别重复文件并加入版本链 |
+| POST | `/api/materials/upload` | 上传资料（单文件） |
+| POST | `/api/materials/upload-batch` | 批量上传多个文件 |
 | POST | `/api/materials` | 登记新资料（无附件）并加入版本链 |
+| POST | `/api/import/url` | 从链接导入（网盘/班级群分享直链，带 SSRF 防护） |
+| GET | `/api/sources` | 资料渠道注册表（来源标签、采集方式、可信度权重） |
 | GET | `/api/materials/:materialId/file` | 鉴权下载资料附件（Bearer Token） |
 | GET | `/api/search?q=需求` | 中文全文检索（FTS5 trigram + LIKE 兜底） |
 | PUT | `/api/materials/:materialId/review` | 教师/管理员确认或撤销资料审核（仅限自己课程） |
