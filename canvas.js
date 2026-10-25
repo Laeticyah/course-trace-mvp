@@ -62,6 +62,11 @@ function effectiveMode() {
   return "mock";
 }
 
+/** 下载 Canvas 文件时需要携带的鉴权头（无有效 token 时为空对象） */
+function getAuthHeaders() {
+  return hasToken() ? { Authorization: `Bearer ${TOKEN}` } : {};
+}
+
 /** 格式化日期为 xxxx.xx.xx */
 function formatDate(value) {
   const d = new Date(value);
@@ -372,6 +377,7 @@ module.exports = {
   mockCollectCourseFiles,
   realCollectCourseFiles,
   hasToken,
+  getAuthHeaders,
   cfg,
   BASE_URL,
   MODE,

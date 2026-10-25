@@ -119,8 +119,12 @@ async function executeSyncJob(jobId) {
         const raw = await withTimeout(canvas.collectCourseFiles(courseId), SYNC_TIMEOUT_MS, "Canvas 采集超时");
         const collection = normalizeCollection(raw, courseId);
         const mode = raw && raw.mode ? raw.mode : "unknown";
-        if (mode === "mock" && !collection.length) {
-          throw new Error("Canvas 采集结果为空");
+        const diagnostics = (raw && raw.diagnostics) || [];
+        if (diagnostics.length) {
+          appendSyncJobLog(jobId, "warn", "Canvas 采集提示：" + diagnostics.slice(0, 3).join("；"));
+        }
+        if (!collection.length) {
+          throw Object.assign(new Error("CANVAS_EMPTY_COLLECTION"), { code: "EMPTY_COLLECTION" });
         }
         collected = collection;
         appendSyncJobLog(jobId, "info", "Canvas 采集完成（" + mode + "），共 " + collected.length + " 条记录");
@@ -128,18 +132,21 @@ async function executeSyncJob(jobId) {
       } catch (collectErr) {
         lastCollectError = collectErr;
         appendSyncJobLog(jobId, "warn", "采集失败（第 " + attempt + "/" + MAX_ATTEMPTS + " 次）：" + (collectErr.message || collectErr));
+        // 空结果/非 Canvas 课程属于确定性失败，不再重试
+        if (collectErr.code === "EMPTY_COLLECTION") break;
         if (attempt < MAX_ATTEMPTS) {
           await sleep(Math.min(RETRY_MAX_DELAY_MS, RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1)));
         }
       }
     }
-    if (!collected) {
+    if (!collected || collected.length === 0) {
       // 仅在 mock 模式下允许用演示数据兜底；真实模式失败不再静默写入虚构资料
       if (canvas.MODE === "mock") {
         appendSyncJobLog(jobId, "warn", "使用本地演示数据完成同步：" + (lastCollectError ? lastCollectError.message : ""));
         collected = mockCollect(courseId);
-      } else {
-        throw lastCollectError || new Error("Canvas 采集失败");
+      }
+      if (!collected || collected.length === 0) {
+        throw lastCollectError || new Error("CANVAS_EMPTY_COLLECTION");
       }
     }
 
@@ -263,7 +270,7 @@ async function executeSyncJob(jobId) {
     appendSyncJobLog(jobId, "success", "同步成功");
     emitProgress(jobId, { job: dbModule.getSyncJob(jobId), event: "done" });
   } catch (err) {
-    const timeoutMsg = err && err.code === "SYNC_TIMEOUT" ? "操作超时" : err.message || "同步异常";
+    const timeoutMsg = formatSyncError(err);
     updateSyncJob(jobId, {
       status: "failed",
       error: timeoutMsg,
@@ -274,6 +281,18 @@ async function executeSyncJob(jobId) {
   }
 }
 
+/** 把底层错误转成可读的失败原因（前端 toast / 任务日志直接展示） */
+function formatSyncError(error) {
+  const message = String((error && error.message) || error || "同步异常");
+  if (error && error.code === "SYNC_TIMEOUT") return "操作超时";
+  if (message.includes("TOKEN_UNAUTHORIZED")) return "Canvas Token 无效，或没有该课程的访问权限";
+  if (message.includes("CANVAS_HTTP_404")) return "Canvas 上找不到该课程（种子课程不是 Canvas 课程，请选择 Canvas 同步课程）";
+  if (message.includes("CANVAS_HTTP_")) return "Canvas 接口返回异常：" + message;
+  if (message.includes("CANVAS_EMPTY_COLLECTION")) return "Canvas 上没有采集到资料（该课程可能不是 Canvas 课程，或课程资料为空）";
+  if (message.includes("NO_VALID_TOKEN")) return "未配置有效的 Canvas Token";
+  return message;
+}
+
 function normalizeCollection(raw, courseId) {
   const arr = Array.isArray(raw) ? raw : (raw.items || raw.entries || []);
   return arr.map((it) => ({
@@ -282,9 +301,12 @@ function normalizeCollection(raw, courseId) {
     source: it.source || "Canvas",
     version: it.version || "V1.0",
     date: it.date || it.modified_at || it.created_at || it.updated_at || "",
-    fileSize: it.size ?? null,
+    fileSize: it.size ?? it.fileSize ?? null,
+    fileName: it.fileName || it.display_name || it.name || null,
+    mime: it.mime || it["content-type"] || null,
+    // Canvas 原始字段叫 fileUrl（canvas.js 的 toMaterialEntry），兼容旧字段 url
+    url: it.fileUrl || it.url || null,
     text: it.text || "",
-    url: it.url || null,
   }));
 }
 
@@ -326,7 +348,7 @@ async function downloadIncremental(courseId, entries, jobId) {
     if (!entry.url) continue;
     // 演示数据里的假地址不发起真实网络请求
     if (String(entry.url).startsWith("https://mock/")) continue;
-    const filename = (entry.name || "file").replace(/[\\/:*?"<>|]/g, "_");
+    const filename = (entry.fileName || entry.name || "file").replace(/[\\/:*?"<>|]/g, "_");
     const localPath = path.join(dir, filename);
     try {
       const stat = await fsP.stat(localPath);
@@ -335,7 +357,7 @@ async function downloadIncremental(courseId, entries, jobId) {
       /* 文件不存在则下载 */
     }
     try {
-      const resp = await fetch(entry.url);
+      const resp = await fetch(entry.url, { headers: canvas.getAuthHeaders() });
       if (resp.ok) {
         const buf = Buffer.from(await resp.arrayBuffer());
         await fsP.writeFile(localPath, buf);
@@ -343,9 +365,11 @@ async function downloadIncremental(courseId, entries, jobId) {
         entry.fileHash = crypto.createHash("sha256").update(buf).digest("hex");
         entry.fileSize = buf.length;
         count++;
+      } else {
+        appendSyncJobLog(jobId, "warn", "文件下载失败（HTTP " + resp.status + "）：" + filename);
       }
     } catch (e) {
-      // 单个文件下载失败不阻断
+      appendSyncJobLog(jobId, "warn", "文件下载失败：" + filename + "，" + (e.message || e));
     }
   }
   return count;
