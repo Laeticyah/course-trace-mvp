@@ -94,7 +94,12 @@ function switchView(view){
 }
 function showToast(text){ $("#toast p").textContent=text; $("#toast").classList.add("show"); setTimeout(()=>$("#toast").classList.remove("show"),2600); }
 function openModal(){ $("#material-modal").classList.add("open"); $("#material-modal").setAttribute("aria-hidden","false"); }
-function closeModal(){ $("#material-modal").classList.remove("open"); $("#material-modal").setAttribute("aria-hidden","false"); }
+function closeModal(){ $("#material-modal").classList.remove("open"); $("#material-modal").setAttribute("aria-hidden","true"); }
+function openLogin(){ const modal=$("#login-modal"); if(!modal) return; modal.classList.add("open"); modal.setAttribute("aria-hidden","false"); }
+function closeLogin(){ const modal=$("#login-modal"); if(!modal) return; modal.classList.remove("open"); modal.setAttribute("aria-hidden","true"); }
+
+/* 标记数据已就绪：供骨架屏等增强层轮询使用（window.__apiReady） */
+function markReady(){ window.__apiReady = true; }
 
 /**
  * 从后端 API 加载数据（统一数据源入口）
@@ -128,10 +133,12 @@ async function loadFromApi(){
     } else {
       // 生产模式：显示明确的错误提示
       showApiError(error.message);
+      markReady();
       return;
     }
   }
   renderCourseCards(); renderAlerts(); renderCourseList(); renderArchive();
+  markReady();
 }
 
 function showApiError(message) {
@@ -154,8 +161,11 @@ async function loadCurrentUser(){
       currentUser = (await response.json()).user;
       $("#account-button").textContent = currentUser.displayName.slice(0, 1);
       $("#account-button").title = `${currentUser.displayName} · ${currentUser.role}`;
+      const loginHint = document.getElementById("login-hint");
+      if (loginHint) loginHint.hidden = true;
     } else {
       authToken = "";
+      localStorage.removeItem("courseTraceToken");
       localStorage.removeItem("courseToken");
     }
 }
@@ -219,6 +229,7 @@ $("#material-form").addEventListener("submit", async e=>{
   try {
     const response=await fetch(endpoint,options);
     const result=await response.json();
+    if(response.status===401||response.status===403){closeModal();openLogin();return;}
     if(!response.ok){showToast(result.message||"资料保存失败");return;}
     showToast("资料已加入资料库，内容指纹已生成 ✓");
     closeModal();
@@ -236,7 +247,9 @@ $("#login-form").addEventListener("submit", async e=>{
     const result=await response.json();
     if(!response.ok){showToast(result.message||"登录失败");return;}
     authToken=result.token;
-    localStorage.setItem("courseToken",result.token);
+    localStorage.setItem("courseTraceToken",result.token);
+    const loginHint=document.getElementById("login-hint");
+    if(loginHint) loginHint.hidden=true;
     currentUser=result.user;
     $("#account-button").textContent=result.user.displayName.slice(0,1);
     $("#account-button").title=`${result.user.displayName} · ${result.user.role}`;
@@ -250,6 +263,12 @@ $("#login-form").addEventListener("submit", async e=>{
   }
 });
 
+/* 登录层：头像入口、关闭按钮、遮罩点击 */
+$("#account-button").addEventListener("click",()=> currentUser ? showToast(`${currentUser.displayName} · ${currentUser.role}`) : openLogin());
+$$("[data-close-login]").forEach(b=>b.addEventListener("click",closeLogin));
+$$("[data-open-login]").forEach(b=>b.addEventListener("click",openLogin));
+$("#login-modal").addEventListener("click",e=>{if(e.target.id==="login-modal")closeLogin();});
+
 async function boot(){
   if(!authToken){
     // 未登录：锁定主界面，只显示登录层（若有内置演示数据先渲染）
@@ -258,6 +277,7 @@ async function boot(){
       alerts = MockData.getAlerts();
       renderCourseCards(); renderAlerts(); renderCourseList(); renderArchive();
     }
+    markReady();
     openLogin();
     return;
   }

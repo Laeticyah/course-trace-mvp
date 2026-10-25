@@ -217,8 +217,11 @@
   /* 启动                                                            */
   /* ------------------------------------------------------------ */
   function boot() {
-    Ux.skeleton($("#course-cards"), 3);
-    Ux.skeleton($("#alert-list"), 2);
+    // 数据已就绪时不再覆盖为骨架屏（例如未登录直接渲染演示数据）
+    if (!window.__apiReady) {
+      Ux.skeleton($("#course-cards"), 3);
+      Ux.skeleton($("#alert-list"), 2);
+    }
     Ux.wireRetry();
     Ux.wireUpload();
     Ux.applyRoleVisibility();
@@ -226,16 +229,15 @@
 
     // 数据加载完成后隐藏骨架屏（轮询检查 app.js 是否已渲染）
     var poll = setInterval(function () {
-      if (window.__apiReady) {
-        clearInterval(poll);
-        var cards = $("#course-cards");
-        var alerts = $("#alert-list");
-        if (cards && cards.querySelector(".skeleton-card")) {
-          renderCourseCards();
-          renderAlerts();
-          renderCourseList();
-          renderArchive();
-        }
+      if (!window.__apiReady) return;
+      clearInterval(poll);
+      var cards = $("#course-cards");
+      var alerts = $("#alert-list");
+      if (cards && cards.querySelector(".skeleton-card")) {
+        renderCourseCards();
+        renderAlerts();
+        renderCourseList();
+        renderArchive();
       }
     }, 300);
   }
