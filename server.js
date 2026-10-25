@@ -22,7 +22,9 @@ const syncEngine = require("./sync-engine");
 const app = express();
 const port = Number(process.env.PORT || 4173);
 const execFileAsync = promisify(execFile);
-const uploadDir = path.join(__dirname, "uploads");
+const uploadDir = process.env.UPLOAD_DIR
+  ? path.resolve(process.env.UPLOAD_DIR)
+  : path.join(__dirname, "uploads");
 const upload = multer({
   dest: uploadDir,
   limits: { fileSize: 25 * 1024 * 1024 }
@@ -53,6 +55,58 @@ const seed = {
     {title:"人工智能导论 · 机器学习概览", desc:"版本 V4.0 已同步，新增 2 个示例。", time:"10 月 10 日", course:"人工智能导论", unread:false}
   ]
 };
+
+/* 静态资源白名单：只对外暴露前端页面与脚本，源码 / 数据库 / 上传文件不再走静态托管 */
+const PUBLIC_FILES = new Set([
+  "/", "/index.html", "/styles.css", "/app.js",
+  "/mock-data.js", "/enhancements.js", "/ux-polish.js"
+]);
+
+function sanitizeFileName(name){
+  const base = path.basename(String(name || "file")).replace(/[\\/:*?"<>|]/g, "_").replace(/^\.+/, "_");
+  return base.slice(0, 120) || "file";
+}
+
+/* 新版本入库前，把同一版本链上的旧资料标记为已归档 */
+function archivePreviousVersions(course, chainId){
+  for(const item of course.materials || []){
+    if(item.versionChainId === chainId && item.status !== "archived"){
+      item.status = "archived";
+      item.statusText = "已归档";
+    }
+  }
+}
+
+function findMaterialById(data, materialId){
+  for(const course of data.courses || []){
+    const material = (course.materials || []).find(item => item.id === materialId);
+    if(material) return { course, material };
+  }
+  return null;
+}
+
+/* 校验并解析上传目录内的文件（防止越权读取项目内其它文件）
+ * 兼容两种库内路径：相对项目根目录（uploads/...）与绝对路径；
+ * 设置 UPLOAD_DIR 时，把旧的 uploads/ 前缀映射到新的上传目录。 */
+function resolveUploadPath(filePath){
+  if(!filePath) return null;
+  const root = path.resolve(uploadDir);
+  const candidates = [];
+  if(path.isAbsolute(filePath)){
+    candidates.push(path.resolve(filePath));
+  }else{
+    candidates.push(path.resolve(__dirname, filePath));
+    const normalized = String(filePath).replace(/\\/g, "/");
+    if(normalized === "uploads" || normalized.startsWith("uploads/")){
+      const suffix = normalized.slice("uploads".length).replace(/^\//, "");
+      candidates.push(path.resolve(uploadDir, suffix));
+    }
+  }
+  for(const absolute of candidates){
+    if(absolute === root || absolute.startsWith(root + path.sep)) return absolute;
+  }
+  return null;
+}
 
 function normalizeMaterial(input){
   const official = input.source === "Canvas" || input.source === "知途好课";
@@ -213,15 +267,22 @@ function applyAuthority(courses){
     }
     for(const chain of chains.values()){
       const scored = chain.map(material => ({ material, breakdown: calculateAuthority(material, chain) }));
-      const approved = scored
+      // 已归档版本不参与“当前权威版”评选
+      const active = scored.filter(item => item.material.status !== "archived");
+      const approved = active
         .filter(item => item.material.reviewStatus === "approved")
         .sort((a, b) => parseDate(b.material.date) - parseDate(a.material.date))[0];
-      const authoritative = approved || scored.reduce((best, item) =>
+      const authoritative = approved || active.reduce((best, item) =>
         !best || item.breakdown.score > best.breakdown.score ? item : best, null);
       for(const { material, breakdown } of scored){
         material.authorityScore = breakdown.score;
         material.authorityBreakdown = breakdown;
-        material.isAuthoritative = material.id === authoritative.material.id;
+        if(material.status === "archived"){
+          material.isAuthoritative = false;
+          material.statusText = "已归档";
+          continue;
+        }
+        material.isAuthoritative = Boolean(authoritative && material.id === authoritative.material.id);
         if(material.status === "official"){
           material.statusText = material.isAuthoritative ? "最新权威版" : "官方历史版";
         } else {
@@ -234,7 +295,13 @@ function applyAuthority(courses){
 }
 
 app.use(express.json({ limit: "1mb" }));
-app.use(express.static(__dirname));
+// 只放行前端资源白名单；/api/* 交给路由处理，其余一律 404
+app.use((req, res, next) => {
+  if (req.path.startsWith("/api/")) return next();
+  if (!PUBLIC_FILES.has(req.path)) return res.status(404).type("text/plain").send("Not Found");
+  next();
+});
+app.use(express.static(__dirname, { index: "index.html", dotfiles: "ignore" }));
 
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true, service: "course-trace-api", time: new Date().toISOString() });
@@ -370,39 +437,69 @@ app.get("/api/me/courses", requireAuth, (req, res) => {
   res.json({ courses: listUserCourses(req.user.id) });
 });
 
-// 列出某个课程已下载到本地的文件
+// 列出某个课程已下载到本地的文件（需课程访问权限）
 app.get("/api/courses/:courseId/files", requireAuth, async (req, res, next) => {
   try {
     const { courseId } = req.params;
-    const dir = path.join(uploadDir, String(courseId));
+    const user = currentUser(req);
+    const data = readData();
+    if (!data.courses.some(course => course.id === courseId)) {
+      return res.status(404).json({ error: "COURSE_NOT_FOUND", message: "课程不存在" });
+    }
+    if (!canViewCourse(user, courseId)) return res.status(403).json({ error: "ACCESS_DENIED", message: "请先加入该课程" });
     let names = [];
-    try { names = await fs.readdir(dir); } catch (_) { names = []; }
+    try { names = await fs.readdir(path.join(uploadDir, String(courseId))); } catch (_) { names = []; }
     res.json({ courseId, files: names });
   } catch (err) {
     next(err);
   }
 });
 
-// 下载本地 uploads/<courseId>/ 中已采集的资料文件
+// 下载 uploads/<courseId>/ 下已采集的文件（校验课程权限 + 防路径穿越）
 app.get("/api/courses/:courseId/files/:fileName", requireAuth, async (req, res, next) => {
   try {
-    const { courseId, fileName } = req.params;
+    const { courseId } = req.params;
+    const requested = String(req.params.fileName);
+    const safeName = sanitizeFileName(requested);
+    if (safeName !== requested) return res.status(400).json({ error: "INVALID_PATH", message: "非法路径" });
     const user = currentUser(req);
-    if (!canViewCourse(user, courseId)) return res.status(403).json({ error: "ACCESS_DENIED", message: "请先登录" });
-    const filePath = path.join(uploadDir, String(courseId), String(fileName));
-    // 防止路径穿越
-    if (!filePath.startsWith(path.join(uploadDir, String(courseId)))) {
+    const data = readData();
+    if (!data.courses.some(course => course.id === courseId)) {
+      return res.status(404).json({ error: "COURSE_NOT_FOUND", message: "课程不存在" });
+    }
+    if (!canViewCourse(user, courseId)) return res.status(403).json({ error: "ACCESS_DENIED", message: "请先加入该课程" });
+    const courseDir = path.resolve(uploadDir, String(courseId));
+    const filePath = path.resolve(courseDir, safeName);
+    if (!filePath.startsWith(courseDir + path.sep)) {
       return res.status(400).json({ error: "INVALID_PATH", message: "非法路径" });
     }
     const stat = await fs.stat(filePath);
     if (!stat.isFile()) return res.status(404).json({ error: "FILE_NOT_FOUND", message: "本地文件不存在" });
-    res.download(filePath, fileName);
+    res.download(filePath, safeName);
   } catch (err) {
     if (err.code === "ENOENT") {
       res.status(404).json({ error: "FILE_NOT_FOUND", message: "本地文件不存在" });
     } else {
       next(err);
     }
+  }
+});
+
+// 按资料 id 下载附件：从数据库取 file_path，鉴权后下发（上传/同步统一入口）
+app.get("/api/materials/:materialId/file", requireAuth, async (req, res, next) => {
+  try {
+    const user = currentUser(req);
+    const data = readData();
+    const found = findMaterialById(data, req.params.materialId);
+    if (!found) return res.status(404).json({ error: "MATERIAL_NOT_FOUND", message: "资料不存在" });
+    if (!canViewCourse(user, found.course.id)) return res.status(403).json({ error: "ACCESS_DENIED", message: "无权访问该资料" });
+    const filePath = resolveUploadPath(found.material.filePath);
+    if (!filePath) return res.status(404).json({ error: "FILE_NOT_FOUND", message: "该资料没有本地文件" });
+    const stat = await fs.stat(filePath).catch(() => null);
+    if (!stat || !stat.isFile()) return res.status(404).json({ error: "FILE_NOT_FOUND", message: "本地文件不存在" });
+    res.download(filePath, sanitizeFileName(found.material.fileName || path.basename(filePath)));
+  } catch (err) {
+    next(err);
   }
 });
 
@@ -478,7 +575,11 @@ app.post("/api/materials", requireAuth, requireRole("teacher", "admin"), async (
     const data = readData();
     const course = data.courses.find(item => item.id === courseId);
     if(!course) return res.status(404).json({ error: "COURSE_NOT_FOUND", message: "课程不存在" });
-    const material = normalizeMaterial({ name, type, source });
+    const previous = course.materials.find(item => item.name === name && item.type === type);
+    const versionChainId = previous ? previous.versionChainId : crypto.randomUUID();
+    archivePreviousVersions(course, versionChainId);
+    const material = normalizeMaterial({ name, type, source, versionChainId });
+    material.version = nextVersion(course.materials, name, type);
     course.materials.unshift(material);
     course.count += 1;
     course.updates = "刚刚更新";
@@ -498,6 +599,7 @@ app.post("/api/materials", requireAuth, requireRole("teacher", "admin"), async (
 });
 
 app.post("/api/materials/upload", requireAuth, requireRole("teacher", "admin"), upload.single("file"), async (req, res, next) => {
+  let storedFilePath = null;
   try {
     const { name, course: courseId, type, source } = req.body;
     if(!name || !courseId || !type || !source || !req.file) {
@@ -527,12 +629,25 @@ app.post("/api/materials/upload", requireAuth, requireRole("teacher", "admin"), 
     const versionChainId = related?.item.versionChainId
       || course.materials.find(item => item.name === name && item.type === type)?.versionChainId
       || crypto.randomUUID();
+    // 新版本入库：同一版本链上的旧资料转为历史归档
+    archivePreviousVersions(course, versionChainId);
+    // 落盘到 uploads/<courseId>/，与下载路由保持一致（下载按资料 id 从库中取路径）
+    const courseUploadDir = path.join(uploadDir, String(courseId));
+    await fs.mkdir(courseUploadDir, { recursive: true });
+    const storedName = `${Date.now()}-${crypto.randomBytes(4).toString("hex")}-${sanitizeFileName(req.file.originalname)}`;
+    const storedPath = path.join(courseUploadDir, storedName);
+    try {
+      await fs.rename(req.file.path, storedPath);
+    } catch (moveError) {
+      await fs.copyFile(req.file.path, storedPath);
+      await fs.rm(req.file.path, { force: true });
+    }
+    storedFilePath = storedPath;
     const material = normalizeMaterial({
       name, type, source, fileHash, fileName: req.file.originalname,
-      fileSize: req.file.size, versionChainId
+      fileSize: req.file.size, versionChainId, filePath: path.relative(__dirname, storedPath)
     });
     material.version = nextVersion(course.materials, name, type);
-    material.filePath = path.relative(__dirname, req.file.path);
     material.extractedText = features;
     material.similarity = related ? Number(related.score.toFixed(3)) : null;
     material.versionReason = related
@@ -568,6 +683,7 @@ app.post("/api/materials/upload", requireAuth, requireRole("teacher", "admin"), 
     });
   } catch(error) {
     if(req.file) await fs.rm(req.file.path, { force: true }).catch(() => {});
+    if(storedFilePath) await fs.rm(storedFilePath, { force: true }).catch(() => {});
     next(error);
   }
 });

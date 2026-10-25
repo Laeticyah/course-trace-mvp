@@ -3,7 +3,9 @@ const path = require("node:path");
 const { DatabaseSync } = require("node:sqlite");
 const crypto = require("node:crypto");
 
-const databaseFile = path.join(__dirname, "course-trace.sqlite");
+const databaseFile = process.env.DB_FILE
+  ? path.resolve(process.env.DB_FILE)
+  : path.join(__dirname, "course-trace.sqlite");
 const legacyDataFile = path.join(__dirname, "data.json");
 const db = new DatabaseSync(databaseFile);
 
@@ -205,28 +207,28 @@ db.exec(`
 })();
 
 // ---- FTS5 全文搜索 ----
-// 说明: 使用独立的内容表 + 触发器维护，避免外部内容表对 schema 的强依赖。
+// 说明: 使用独立的内容表，写入后全量重建（writeData/syncFTSIndex），避免 rowid 错位。
+// 中文检索使用 trigram 分词器（unicode61 不切分中文，导致“需求分析”这类查询 0 结果）。
 // 缺失时优雅降级为 LIKE 查询。
 let ftsAvailable = false;
 function initFTS() {
   try {
+    const existing = db.prepare("SELECT sql FROM sqlite_master WHERE name = 'materials_fts'").get();
+    const existingSql = existing && existing.sql ? existing.sql : "";
+    const compatible = existing && /tokenize\s*=\s*'trigram'/i.test(existingSql) && /(^|[\s,(])content([\s,)]|$)/i.test(existingSql);
+    if (existing && !compatible) {
+      db.exec("DROP TABLE materials_fts");
+    }
     db.exec(`
       CREATE VIRTUAL TABLE IF NOT EXISTS materials_fts USING fts5(
-        name, type, source, course_name,
-        tokenize='unicode61'
+        name, type, source, course_name, content,
+        tokenize='trigram'
       );
     `);
+    ftsAvailable = true;
     // 判断是否已同步, 如果虚拟表为空则从 materials 全量导入
     const count = db.prepare("SELECT COUNT(*) AS n FROM materials_fts").get().n;
-
-    ftsAvailable = true;
-    if (count === 0) {
-      db.exec(`
-        INSERT INTO materials_fts(rowid, name, type, source, course_name)
-        SELECT m.rowid, m.name, m.type, m.source, c.name
-        FROM materials m JOIN courses c ON c.id = m.course_id
-      `);
-    }
+    if (count === 0) syncFTSIndex();
   } catch (e) {
     console.warn("[database] FTS5 不可用，已降级为 LIKE 搜索:", e.message);
   }
@@ -309,7 +311,9 @@ function readData() {
 }
 
 function writeData(data) {
-  const transaction = () => {
+  // 事务化：中途失败回滚，避免出现“删了旧数据但没写回新数据”的半截库
+  db.exec("BEGIN IMMEDIATE");
+  try {
     const memberships = db.prepare("SELECT * FROM course_members").all();
     db.prepare("DELETE FROM materials").run();
     db.prepare("DELETE FROM course_members").run();
@@ -347,8 +351,13 @@ function writeData(data) {
     }
     const insertAlert = db.prepare("INSERT INTO alerts (title, description, time, course, unread) VALUES (?, ?, ?, ?, ?)");
     for (const alert of data.alerts) insertAlert.run(alert.title, alert.desc, alert.time, alert.course, alert.unread ? 1 : 0);
-  };
-  transaction();
+    db.exec("COMMIT");
+  } catch (error) {
+    try { db.exec("ROLLBACK"); } catch (_) { /* ignore rollback failure */ }
+    throw error;
+  }
+  // 重插后 rowid 全部变化，必须同步重建 FTS，否则检索结果会错位
+  syncFTSIndex();
 }
 
 if (db.prepare("SELECT COUNT(*) AS count FROM courses").get().count === 0 && fs.existsSync(legacyDataFile)) {
@@ -518,8 +527,8 @@ function syncFTSIndex() {
   try {
     db.exec("DELETE FROM materials_fts");
     db.exec(`
-      INSERT INTO materials_fts(rowid, name, type, source, course_name)
-      SELECT m.rowid, m.name, m.type, m.source, c.name
+      INSERT INTO materials_fts(rowid, name, type, source, course_name, content)
+      SELECT m.rowid, m.name, m.type, m.source, c.name, COALESCE(m.extracted_text, '')
       FROM materials m JOIN courses c ON c.id = m.course_id
     `);
   } catch (e) {
@@ -546,9 +555,10 @@ function searchMaterials({ q = "", courseId = "", type = "", user = null, limit 
   }
 
   if (q.trim()) {
-    const cleanQ = q.trim().replace(/"/g, '""'); // 转义避免 FTS 语法错误（简单处理）
-    try {
-      if (ftsAvailable) {
+    const rawQ = q.trim();
+    const cleanQ = rawQ.replace(/"/g, '""'); // 转义避免 FTS 语法错误（简单处理）
+    if (ftsAvailable) {
+      try {
         const rows = db.prepare(`
           SELECT m.id, m.name, m.type, m.source, m.version, m.date,
                  m.file_name AS fileName, m.file_size AS fileSize, m.file_path AS filePath,
@@ -559,24 +569,25 @@ function searchMaterials({ q = "", courseId = "", type = "", user = null, limit 
                  c.id AS courseId, c.name AS courseName,
                  bm25(materials_fts) AS rank
           FROM materials_fts
-          JOIN materials m ON m.id = (
-            SELECT id FROM materials WHERE materials.rowid = materials_fts.rowid LIMIT 1
-          )
+          JOIN materials m ON m.rowid = materials_fts.rowid
           JOIN courses c ON c.id = m.course_id
           WHERE materials_fts MATCH ?
             ${where.length ? `AND ${where.join(" AND ")}` : ""}
           ORDER BY rank
           LIMIT ?
         `).all(cleanQ, ...params, limit);
-        return rows.map(r => ({ ...r, rank: undefined }));
+        // trigram 对 <3 个字符的查询命中有限，0 命中时继续走 LIKE 兜底
+        if (rows.length > 0) return rows.map(r => ({ ...r, rank: undefined }));
+      } catch (e) {
+        console.warn("[database] FTS 查询失败，降级 LIKE:", e.message);
       }
-    } catch (e) {
-      console.warn("[database] FTS 查询失败，降级 LIKE:", e.message);
     }
 
-    const likeQ = `%${cleanQ}%`;
-    where.push(`(m.name LIKE ? OR m.type LIKE ? OR m.source LIKE ? OR c.name LIKE ? OR m.version LIKE ?)`);
-    params.push(likeQ, likeQ, likeQ, likeQ, likeQ);
+    // LIKE 兜底：中文子串、短关键词、FTS 语法错误都能命中
+    const escapedQ = rawQ.replace(/[\\%_]/g, (ch) => "\\" + ch);
+    const likeQ = `%${escapedQ}%`;
+    where.push(`(m.name LIKE ? ESCAPE '\\' OR m.type LIKE ? ESCAPE '\\' OR m.source LIKE ? ESCAPE '\\' OR c.name LIKE ? ESCAPE '\\' OR m.version LIKE ? ESCAPE '\\' OR m.extracted_text LIKE ? ESCAPE '\\')`);
+    params.push(likeQ, likeQ, likeQ, likeQ, likeQ, likeQ);
   }
 
   const base = `

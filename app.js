@@ -27,6 +27,76 @@ function authHeaders(headers = {}){
   return authToken ? {...headers, Authorization:`Bearer ${authToken}`} : headers;
 }
 
+/* HTML 转义：服务端字段（资料名/提醒/搜索词）在拼 innerHTML 前统一转义 */
+function esc(value){
+  return String(value == null ? "" : value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+/* 登录态变化后重新应用“教师/管理员可见”的角色 UI（上传入口、管理后台入口等） */
+function refreshRoleUI(){
+  if (globalThis.Ux && typeof globalThis.Ux.applyRoleVisibility === "function") {
+    globalThis.Ux.applyRoleVisibility();
+  }
+}
+
+/* 鉴权下载：<a> 无法携带 Bearer Token，改为 fetch + Blob */
+async function downloadMaterial(materialId, fileName){
+  try {
+    const response = await fetch(`/api/materials/${encodeURIComponent(materialId)}/file`, { headers: authHeaders() });
+    if (response.status === 401) { openLogin(); return; }
+    if (!response.ok) { showToast("文件下载失败：本地未采集到该文件"); return; }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = fileName || "material";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    showToast("开始下载：" + (fileName || "资料文件"));
+  } catch (error) {
+    showToast("文件下载失败");
+    console.error(error);
+  }
+}
+
+/* 取课程中“版本最多”的版本链（同等数量取最新），用于版本时间线与可回溯标题 */
+function versionChain(course){
+  const materials = (course.materials || []).slice();
+  if (!materials.length) return { primary: null, chain: [] };
+  const groups = new Map();
+  materials.forEach(m => {
+    const key = m.versionChainId || `${m.name}:${m.type}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(m);
+  });
+  const chains = Array.from(groups.values());
+  chains.sort((a, b) =>
+    b.length - a.length || String(b[0].date || "").localeCompare(String(a[0].date || "")));
+  const chain = chains[0].slice().sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")));
+  const primary = chain.find(m => m.isAuthoritative && m.status !== "archived") || chain[0];
+  return { primary, chain };
+}
+
+/* 版本时间线：按 versionChainId 展示真实的版本序列（替代原来的硬编码文案） */
+function versionTimeline(course){
+  const { primary, chain } = versionChain(course);
+  if (!primary) return '<div class="empty-state">暂无版本记录</div>';
+  return chain.map((m, index) => {
+    const isCurrent = m.id === primary.id;
+    const note = isCurrent
+      ? "当前权威版 · 内容指纹已确认"
+      : (m.status === "archived" ? "已被新版本替代 · 保留历史记录" : "历史版本");
+    return `<div class="timeline-item${index === 0 ? "" : " old"}"><time>${esc(m.date || "")}${isCurrent ? " · 当前" : ""}</time><strong>${esc(m.version || "V1.0")} ${esc(m.name || "")}</strong><p>${esc(note)}</p></div>`;
+  }).join("");
+}
+
 function courseDot(color){ return `<span class="course-dot ${color}"></span>`; }
 function renderCourseCards(){
   const term = searchTerm.toLowerCase();
@@ -78,8 +148,8 @@ function renderCourseDetail(){
   const c = courses.find(x => x.id === selectedCourse) || courses[0];
   if(!c) return;
   $("#course-detail").innerHTML = `<div class="detail-head"><div><span class="course-code">${c.code}</span><h2>${c.name}</h2><p>${c.desc} · 2026 秋季学期</p></div><div class="detail-metrics"><div class="metric"><strong>${c.count}</strong><small>资料总数</small></div><div class="metric"><strong>${c.official}</strong><small>官方资料</small></div></div></div>
-    <div class="material-group"><div class="group-head"><h3>最新权威资料</h3><span>默认按可信度排序</span></div>${(c.materials||[]).map(m => `<div class="material-row"><span class="material-icon">${m.icon}</span><div><strong>${m.name}</strong><small>${m.type} · ${m.source} · ${m.version} · ${m.date}${m.authorityScore ? ` · 权威度 ${Math.round(m.authorityScore*100)}%` : ""}${m.reviewStatus === "approved" ? " · 已审核" : ""}</small></div><span class="tag status-tag ${m.status}">${m.statusText}</span>${m.filePath ? `<a class="download-link" href="/api/courses/${c.id}/files/${encodeURIComponent(m.fileName || m.name)}" title="下载已采集到本地的资料文件">⬇ 下载</a>` : `<span class="download-link download-placeholder">未采集到文件</span>`}${currentUser && ["teacher","admin"].includes(currentUser.role) ? `<button class="review-button" data-review-material="${m.id}" data-review-status="${m.reviewStatus === "approved" ? "pending" : "approved"}">${m.reviewStatus === "approved" ? "撤销审核" : "确认权威"}</button>` : ""}</div>`).join("")}</div>
-    <div class="material-group"><div class="group-head"><h3>版本时间线</h3><span>可回溯 ${(c.materials&&c.materials[0])?c.materials[0].name:'资料'}</span></div><div class="timeline"><div class="timeline-item"><time>2026.10.15 · 当前</time><strong>${(c.materials&&c.materials[0])?c.materials[0].version:'V1.0'} ${(c.materials&&c.materials[0])?c.materials[0].name:''}</strong><p>官方来源 · 内容指纹已确认变更 · 当前权威版</p></div><div class="timeline-item"><time>2026.10.08</time><strong>V2.0 ${(c.materials&&c.materials[0])?c.materials[0].name:''}</strong><p>已被新版本替代 · 保留历史记录</p></div><div class="timeline-item old"><time>2026.09.21</time><strong>V1.0 ${(c.materials&&c.materials[0])?c.materials[0].name:''}</strong><p>初始上传版本 · 已归档</p></div></div></div>`;
+    <div class="material-group"><div class="group-head"><h3>最新权威资料</h3><span>默认按可信度排序</span></div>${(c.materials||[]).map(m => `<div class="material-row"><span class="material-icon">${esc(m.icon || "▤")}</span><div><strong>${esc(m.name)}</strong><small>${esc(m.type)} · ${esc(m.source)} · ${esc(m.version)} · ${esc(m.date)}${m.authorityScore ? ` · 权威度 ${Math.round(m.authorityScore*100)}%` : ""}${m.reviewStatus === "approved" ? " · 已审核" : ""}</small></div><div class="material-row-actions"><span class="tag status-tag ${m.status}">${esc(m.statusText)}</span>${m.filePath ? `<button class="download-link" data-download-material="${esc(m.id)}" data-download-name="${esc(m.fileName || m.name || "material")}" title="下载已采集到本地的资料文件">下载</button>` : `<span class="download-placeholder">未采集到文件</span>`}${currentUser && ["teacher","admin"].includes(currentUser.role) ? `<button class="review-button" data-review-material="${m.id}" data-review-status="${m.reviewStatus === "approved" ? "pending" : "approved"}">${m.reviewStatus === "approved" ? "撤销审核" : "确认权威"}</button>` : ""}</div></div>`).join("")}</div>
+    <div class="material-group"><div class="group-head"><h3>版本时间线</h3><span>可回溯 ${esc((versionChain(c).primary || {}).name || "资料")}</span></div><div class="timeline">${versionTimeline(c)}</div></div>`;
 }
 function renderArchive(){
   const rows = courses.flatMap(c => (c.materials||[]).map((m,i)=>({c,m,i})));
@@ -163,6 +233,7 @@ async function loadCurrentUser(){
       $("#account-button").title = `${currentUser.displayName} · ${currentUser.role}`;
       const loginHint = document.getElementById("login-hint");
       if (loginHint) loginHint.hidden = true;
+      refreshRoleUI();
     } else {
       authToken = "";
       localStorage.removeItem("courseTraceToken");
@@ -176,7 +247,23 @@ $$(".nav-item").forEach(b => b.addEventListener("click", () => switchView(b.data
 $$("[data-view-target]").forEach(b => b.addEventListener("click", () => switchView(b.dataset.viewTarget)));
 $$(".course-shortcut").forEach(b => b.addEventListener("click", () => { selectedCourse=b.dataset.course; renderCourseList(); switchView("courses"); }));
 $("#course-list").addEventListener("click", e => { const item=e.target.closest("[data-select-course]"); if(item){selectedCourse=item.dataset.course; renderCourseList();} });
-$("#course-detail").addEventListener("click", async e => { const button=e.target.closest("[data-review-material]"); if(!button) return; const status=button.dataset.reviewStatus; const note=status==="approved"?"教师确认该资料为当前权威版本":"撤销人工审核，恢复算法推荐"; const response=await fetch(`/api/materials/${button.dataset.reviewMaterial}/review`,{method:"PUT",headers:authHeaders({"Content-Type":"application/json"}),body:JSON.stringify({status,note})}); const result=await response.json(); if(!response.ok){showToast(result.message||"审核操作失败");return;} await loadFromApi(); showToast(status==="approved"?"已确认权威版本":"已撤销人工审核"); });
+$("#course-detail").addEventListener("click", async e => {
+  const downloadButton = e.target.closest("[data-download-material]");
+  if(downloadButton){
+    e.preventDefault();
+    await downloadMaterial(downloadButton.dataset.downloadMaterial, downloadButton.dataset.downloadName);
+    return;
+  }
+  const button=e.target.closest("[data-review-material]");
+  if(!button) return;
+  const status=button.dataset.reviewStatus;
+  const note=status==="approved"?"教师确认该资料为当前权威版本":"撤销人工审核，恢复算法推荐";
+  const response=await fetch(`/api/materials/${button.dataset.reviewMaterial}/review`,{method:"PUT",headers:authHeaders({"Content-Type":"application/json"}),body:JSON.stringify({status,note})});
+  const result=await response.json();
+  if(!response.ok){showToast(result.message||"审核操作失败");return;}
+  await loadFromApi();
+  showToast(status==="approved"?"已确认权威版本":"已撤销人工审核");
+});
 $("#course-cards").addEventListener("click", e => { const card=e.target.closest("[data-course-card]"); if(card){selectedCourse=card.dataset.courseCard; renderCourseList(); switchView("courses");} });
 $("#global-search").addEventListener("input", e => {
   const q = e.target.value.trim();
@@ -253,6 +340,7 @@ $("#login-form").addEventListener("submit", async e=>{
     currentUser=result.user;
     $("#account-button").textContent=result.user.displayName.slice(0,1);
     $("#account-button").title=`${result.user.displayName} · ${result.user.role}`;
+    refreshRoleUI();
     closeLogin();
     showToast(`已登录：${result.user.displayName}`);
     await loadFromApi();

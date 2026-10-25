@@ -156,11 +156,9 @@
       $$("[data-role-admin]").forEach(function (el) {
         el.hidden = !canManage;
       });
-      // 登录前的访问提示
-      if (!user) {
-        var hint = document.getElementById("login-hint");
-        if (hint) hint.hidden = false;
-      }
+      // 登录前的访问提示：未登录显示，已登录隐藏
+      var hint = document.getElementById("login-hint");
+      if (hint) hint.hidden = Boolean(user);
     },
 
     /* ------------------------------------------------------------ */
