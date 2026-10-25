@@ -168,6 +168,102 @@ function closeModal(){ $("#material-modal").classList.remove("open"); $("#materi
 function openLogin(){ const modal=$("#login-modal"); if(!modal) return; modal.classList.add("open"); modal.setAttribute("aria-hidden","false"); }
 function closeLogin(){ const modal=$("#login-modal"); if(!modal) return; modal.classList.remove("open"); modal.setAttribute("aria-hidden","true"); }
 
+/* ------------------------- Canvas 同步 UI ------------------------- */
+let syncPollTimer = null;
+
+function openSyncModal(){
+  const modal = $("#sync-modal");
+  if(!modal) return;
+  modal.classList.add("open");
+  modal.setAttribute("aria-hidden","false");
+}
+function closeSyncModal(){
+  clearInterval(syncPollTimer);
+  syncPollTimer = null;
+  const modal = $("#sync-modal");
+  if(!modal) return;
+  modal.classList.remove("open");
+  modal.setAttribute("aria-hidden","true");
+}
+function syncStatusText(job, courseName){
+  const labels = { pending: "排队中", running: "同步中", success: "同步完成", failed: "同步失败", cancelled: "已取消" };
+  const step = job.currentStep && !["done","failed"].includes(job.currentStep) ? ` · ${job.currentStep}` : "";
+  return `${labels[job.status] || job.status} · ${courseName}${step}`;
+}
+function setSyncUI({ progress = 0, status = "", logs = null } = {}){
+  const bar = document.getElementById("sync-progress");
+  if(bar) bar.hidden = false;
+  const fill = document.getElementById("sync-progress-fill");
+  if(fill) fill.style.width = Math.max(0, Math.min(100, Number(progress) || 0)) + "%";
+  const statusEl = document.getElementById("sync-status");
+  if(statusEl && status) statusEl.textContent = status;
+  if(logs) renderSyncLogs(logs);
+}
+function renderSyncLogs(logs){
+  const el = document.getElementById("sync-log");
+  if(!el) return;
+  el.innerHTML = (logs || []).slice(-40).map(line => `<div class="sync-log-line"><time>${esc(String(line.createdAt || "").slice(11, 19))}</time><span class="sync-log-${esc(line.level || "info")}">${esc(line.message || "")}</span></div>`).join("");
+  el.scrollTop = el.scrollHeight;
+}
+function pollSyncJob(jobId, courseName){
+  clearInterval(syncPollTimer);
+  const tick = async () => {
+    try {
+      const [jobRes, logRes] = await Promise.all([
+        fetch(`/api/sync-jobs/${encodeURIComponent(jobId)}`, { headers: authHeaders() }),
+        fetch(`/api/sync-jobs/${encodeURIComponent(jobId)}/logs`, { headers: authHeaders() })
+      ]);
+      if(jobRes.status === 401){ closeSyncModal(); openLogin(); return; }
+      const job = jobRes.ok ? (await jobRes.json()).job : null;
+      const logs = logRes.ok ? ((await logRes.json()).logs || []) : [];
+      if(!job) return;
+      setSyncUI({ progress: job.progress || 0, status: syncStatusText(job, courseName), logs });
+      if(["success","failed","cancelled"].includes(job.status)){
+        clearInterval(syncPollTimer);
+        syncPollTimer = null;
+        if(job.status === "success"){
+          await loadFromApi();
+          showToast(`「${courseName}」同步完成`);
+        }else{
+          showToast("同步失败：" + (job.error || "未知错误"));
+        }
+      }
+    } catch (error) {
+      // 网络抖动时保留轮询，下一次继续
+    }
+  };
+  tick();
+  syncPollTimer = setInterval(tick, 600);
+}
+async function runCourseSync(courseId){
+  if(!currentUser || !["teacher","admin"].includes(currentUser.role)){
+    showToast("请先用教师或管理员账号登录");
+    return;
+  }
+  const course = courses.find(item => item.id === courseId) || courses[0];
+  if(!course){ showToast("没有可同步的课程"); return; }
+  openSyncModal();
+  setSyncUI({ progress: 0, status: `正在为「${course.name}」创建同步任务…`, logs: [] });
+  try {
+    const response = await fetch(`/api/courses/${encodeURIComponent(course.id)}/sync`, {
+      method: "POST",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: "{}"
+    });
+    if(response.status === 401){ closeSyncModal(); openLogin(); return; }
+    const result = await response.json().catch(() => ({}));
+    if(!response.ok){
+      setSyncUI({ status: result.message || "同步任务创建失败" });
+      showToast(result.message || "同步任务创建失败");
+      return;
+    }
+    pollSyncJob(result.job.id, course.name);
+  } catch (error) {
+    setSyncUI({ status: "同步任务创建失败：" + error.message });
+    showToast("同步任务创建失败");
+  }
+}
+
 /* 标记数据已就绪：供骨架屏等增强层轮询使用（window.__apiReady） */
 function markReady(){ window.__apiReady = true; }
 
@@ -305,7 +401,10 @@ $$(".filter-chip").forEach(b => b.addEventListener("click", () => { $$(".filter-
 $("#open-alerts").addEventListener("click",()=>switchView("alerts"));
 $("#mark-read").addEventListener("click",async()=>{try{const response=await fetch("/api/alerts/read",{method:"PUT",headers:authHeaders()});if(response.status===401){openLogin();return;}if(!response.ok)throw new Error(`API ${response.status}`);alerts.forEach(a=>a.unread=false);renderAlerts();showToast("所有提醒已读");}catch(error){showToast("提醒状态更新失败");console.error(error);}});
 $("#add-material").addEventListener("click",openModal); $("#add-course").addEventListener("click",()=>showToast("课程添加功能将在正式版开放"));
-$$("[data-close-modal]").forEach(b=>b.addEventListener("click",closeModal));
+$("#sync-btn") && $("#sync-btn").addEventListener("click",()=>runCourseSync(selectedCourse));
+$("#sync-close") && $("#sync-close").addEventListener("click",closeSyncModal);
+$("#sync-modal") && $("#sync-modal").addEventListener("click",e=>{if(e.target.id==="sync-modal")closeSyncModal();});
+$$("[data-close-modal]").forEach(b=>b.addEventListener("click",()=>{ if(b.closest("#sync-modal")) closeSyncModal(); else closeModal(); }));
 $("#material-modal").addEventListener("click",e=>{if(e.target.id==="material-modal")closeModal();});
 $("#material-form").addEventListener("submit", async e=>{
   e.preventDefault();

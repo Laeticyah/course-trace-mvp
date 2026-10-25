@@ -31,6 +31,9 @@ npm start
 | PUT | `/api/materials/:materialId/review` | 教师/管理员确认或撤销资料审核（仅限自己课程） |
 | GET | `/api/materials/:materialId/file` | 鉴权下载资料附件（Bearer Token） |
 | GET | `/api/search?q=需求` | 中文全文检索（FTS5 + LIKE 兜底） |
+| POST | `/api/courses/:courseId/sync` | 触发课程 Canvas 同步（异步任务，202 + jobId） |
+| GET | `/api/sync-jobs` | 同步任务列表（教师仅自己/自己课程，管理员全部） |
+| GET | `/api/sync-jobs/:id` · `/logs` · `/events` | 任务状态 / 日志 / SSE 进度流（均需 Bearer） |
 | GET | `/api/me/courses` | 获取当前用户已加入的课程 |
 | POST | `/api/courses/:courseId/join` | 学生加入课程 |
 | DELETE | `/api/courses/:courseId/leave` | 学生退出课程 |
@@ -77,6 +80,7 @@ curl.exe -X POST http://localhost:4173/api/materials/upload `
 - 变更提醒：官方课件和作业要求更新提醒、已读状态
 - 历史归档：被替代版本的可回溯列表（上传新版本时自动归档旧版本）
 - 资料登记与上传：SHA-256 判重、版本链识别、文件落盘与鉴权下载
+- Canvas 同步：异步任务队列（202 + jobId）、进度/日志/SSE、失败重试与超时、重启任务恢复、版本升级自动归档
 - 权限：管理员可管理全部课程；教师只能管理自己担任教师的课程；学生只能查看已加入课程
 
 ## 测试

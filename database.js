@@ -805,14 +805,19 @@ function getSyncJob(id) {
   return normalizeSyncJob(row);
 }
 
-function listSyncJobs({ status = "", limit = 50 } = {}) {
-  let sql = "SELECT * FROM sync_jobs";
+function listSyncJobs({ status = "", limit = 50, user = null } = {}) {
+  const where = [];
   const params = [];
   if (status) {
-    sql += " WHERE status = ?";
+    where.push("status = ?");
     params.push(status);
   }
-  sql += " ORDER BY created_at DESC LIMIT ?";
+  // 非管理员只能看到自己创建的、或自己担任教师课程的任务
+  if (user && user.role !== "admin") {
+    where.push("(created_by = ? OR course_id IN (SELECT course_id FROM course_members WHERE user_id = ? AND member_role = 'teacher'))");
+    params.push(user.id, user.id);
+  }
+  const sql = `SELECT * FROM sync_jobs${where.length ? " WHERE " + where.join(" AND ") : ""} ORDER BY created_at DESC LIMIT ?`;
   params.push(limit);
   return db.prepare(sql).all(...params).map(normalizeSyncJob);
 }
@@ -820,18 +825,29 @@ function listSyncJobs({ status = "", limit = 50 } = {}) {
 function updateSyncJob(id, patch) {
   const job = getSyncJob(id);
   if (!job) return null;
-  const allowed = ["progress", "currentStep", "error", "attempts", "status"];
+  const allowed = ["progress", "currentStep", "error", "attempts", "status", "result"];
   const changes = allowed.filter((k) => patch[k] !== undefined);
   if (changes.length > 0) {
     const setSql = changes.map((k) => `${k === "currentStep" ? "current_step" : k} = ?`).join(", ");
+    const values = changes.map((k) => (k === "result" && patch[k] != null ? JSON.stringify(patch[k]) : patch[k]));
     const now = new Date().toISOString();
     const extra = [];
     if (patch.status === "running" && !job.startedAt) extra.push(`started_at = '${now}'`);
     if (patch.status === "success" || patch.status === "failed" || patch.status === "cancelled") extra.push(`finished_at = '${now}'`);
     db.prepare(`UPDATE sync_jobs SET ${setSql}${extra.length ? ", " + extra.join(", ") : ""} WHERE id = ?`)
-      .run(...changes.map((k) => patch[k]), id);
+      .run(...values, id);
   }
   return getSyncJob(id);
+}
+
+/** 服务重启后把遗留的 pending/running 任务标记为失败，避免永远卡在进行中 */
+function recoverInterruptedSyncJobs() {
+  const rows = db.prepare("SELECT id FROM sync_jobs WHERE status IN ('pending', 'running')").all();
+  if (!rows.length) return 0;
+  const now = new Date().toISOString();
+  const stmt = db.prepare("UPDATE sync_jobs SET status = 'failed', error = ?, current_step = 'failed', finished_at = ? WHERE id = ?");
+  for (const row of rows) stmt.run("服务重启，同步任务已中断，请重新触发", now, row.id);
+  return rows.length;
 }
 
 function appendSyncJobLog(jobId, level, message, meta = null) {
@@ -1009,6 +1025,7 @@ module.exports = {
   setArchived, removeMaterial,
   createSyncJob, getSyncJob, listSyncJobs, updateSyncJob,
   appendSyncJobLog, getSyncJobLogs, requireSyncJobAccess,
+  recoverInterruptedSyncJobs,
   addMaterialFile, getMaterialFiles, removeMaterialFile,
   listMaterialFiles: getMaterialFiles, setMaterialFileArchived, restoreMaterialFile,
   addMaterialReview, getMaterialReviews,

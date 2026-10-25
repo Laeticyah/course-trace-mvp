@@ -15,9 +15,12 @@ const {
   isTeacherOrAdmin, canAccessCourse, syncFTSIndex,
   setArchived, removeMaterial,
   createSyncJob, getSyncJob, listSyncJobs, updateSyncJob,
-  appendSyncJobLog, getSyncJobLogs, requireSyncJobAccess
+  appendSyncJobLog, getSyncJobLogs, requireSyncJobAccess,
+  recoverInterruptedSyncJobs
 } = require("./database");
 const syncEngine = require("./sync-engine");
+const { normalizeMaterial } = require("./lib/material");
+const { applyAuthority } = require("./lib/authority");
 
 const app = express();
 const port = Number(process.env.PORT || 4173);
@@ -108,29 +111,6 @@ function resolveUploadPath(filePath){
   return null;
 }
 
-function normalizeMaterial(input){
-  const official = input.source === "Canvas" || input.source === "知途好课";
-  return {
-    id: crypto.randomUUID(),
-    name: String(input.name || "").trim(),
-    type: String(input.type || "课件"),
-    source: String(input.source || "班级群"),
-    version: "V1.0",
-    date: new Date().toISOString().slice(0, 10).replaceAll("-", "."),
-    status: official ? "official" : "student",
-    statusText: official ? "最新权威版" : "学生整理",
-    icon: "▤",
-    fileHash: input.fileHash || null,
-    fileName: input.fileName || null,
-    fileSize: input.fileSize || null,
-    filePath: input.filePath || null,
-    versionChainId: input.versionChainId || crypto.randomUUID(),
-    authorityScore: 0,
-    authorityBreakdown: null,
-    isAuthoritative: false
-  };
-}
-
 function nextVersion(materials, name, type){
   const versions = materials
     .filter(item => item.name === name && item.type === type)
@@ -198,100 +178,6 @@ function similarityScore(left, right){
   let overlap = 0;
   for(const token of a) if(b.has(token)) overlap += 1;
   return overlap / new Set([...a, ...b]).size;
-}
-
-const sourceAuthority = {
-  Canvas: 1,
-  "知途好课": 0.92,
-  "教师上传": 0.95,
-  "班级群": 0.58,
-  网盘: 0.48,
-  转发: 0.4
-};
-
-function parseDate(value){
-  const parsed = new Date(String(value || "").replaceAll(".", "-"));
-  return Number.isNaN(parsed.getTime()) ? new Date(0) : parsed;
-}
-
-function calculateAuthority(material, chain){
-  // —— 五因子可信度加权（来源×35% + 时间×20% + 变更×15% + 审核×20% + 完整度×10%）
-  const sourceScore = sourceAuthority[material.source] ?? 0.35;
-  const newest = Math.max(...chain.map(item => parseDate(item.date).getTime()), Date.now());
-  const ageDays = Math.max(0, (newest - parseDate(material.date).getTime()) / 86400000);
-  const freshnessScore = Math.exp(-ageDays / 30);
-  const similarity = Number(material.similarity ?? 0);
-  const changeScore = material.extractedText
-    ? Math.min(1, Math.max(0.1, 1 - similarity))
-    : 0.55;
-
-  // 教师审核因子：approved → 1，否则 0（默认 pending=0 → 不加分也不扣分）
-  const reviewScore = material.reviewStatus === "approved" ? 1 : 0;
-  // 内容完整度因子：显式提供则用，否则按文件大小粗略估计（≥100KB→1）
-  const rawComplete = clamp01(material.completeness);
-  const completenessScore = material.completeness != null
-    ? rawComplete
-    : material.fileSize ? Math.min(1, Math.max(0.2, material.fileSize / (100 * 1024))) : 0.35;
-
-  const parts = {
-    source: { score: sourceScore, weight: 0.35, label: "来源权威度", detail: `来自 ${material.source}，可信度 ${Math.round(sourceScore * 100)}%` },
-    freshness: { score: freshnessScore, weight: 0.20, label: "时间新度", detail: ageDays < 1 ? "今天更新" : `${Math.round(ageDays)} 天前更新` },
-    change: { score: changeScore, weight: 0.15, label: "内容变更度", detail: `与上一版本相似度 ${Math.round(similarity * 100)}%` },
-    review: { score: reviewScore, weight: 0.20, label: "教师审核", detail: reviewScore ? "已确认，+20%" : "待确认，无加分" },
-    completeness: { score: completenessScore, weight: 0.10, label: "内容完整度", detail: material.fileSize ? `文件 ${(material.fileSize / 1024).toFixed(0)}KB，约 ${Math.round(completenessScore * 100)}% 完整` : "未提供文件，估测 35%" },
-  };
-
-  const score = Object.values(parts).reduce((sum, p) => sum + p.score * p.weight, 0);
-
-  return {
-    score: Number(score.toFixed(3)),
-    parts,
-    breakdown: Object.values(parts)
-      .map(p => ({ label: p.label, value: Number((p.score * p.weight).toFixed(3)), detail: p.detail }))
-      .sort((a, b) => b.value - a.value),
-  };
-}
-
-function clamp01(x){
-  if (x == null || Number.isNaN(Number(x))) return 0.5;
-  return Math.min(1, Math.max(0, Number(x)));
-}
-
-function applyAuthority(courses){
-  for(const course of courses){
-    const chains = new Map();
-    for(const material of course.materials){
-      const chainId = material.versionChainId || `${material.name}:${material.type}`;
-      if(!chains.has(chainId)) chains.set(chainId, []);
-      chains.get(chainId).push(material);
-    }
-    for(const chain of chains.values()){
-      const scored = chain.map(material => ({ material, breakdown: calculateAuthority(material, chain) }));
-      // 已归档版本不参与“当前权威版”评选
-      const active = scored.filter(item => item.material.status !== "archived");
-      const approved = active
-        .filter(item => item.material.reviewStatus === "approved")
-        .sort((a, b) => parseDate(b.material.date) - parseDate(a.material.date))[0];
-      const authoritative = approved || active.reduce((best, item) =>
-        !best || item.breakdown.score > best.breakdown.score ? item : best, null);
-      for(const { material, breakdown } of scored){
-        material.authorityScore = breakdown.score;
-        material.authorityBreakdown = breakdown;
-        if(material.status === "archived"){
-          material.isAuthoritative = false;
-          material.statusText = "已归档";
-          continue;
-        }
-        material.isAuthoritative = Boolean(authoritative && material.id === authoritative.material.id);
-        if(material.status === "official"){
-          material.statusText = material.isAuthoritative ? "最新权威版" : "官方历史版";
-        } else {
-          material.statusText = "学生整理";
-        }
-      }
-    }
-  }
-  return courses;
 }
 
 app.use(express.json({ limit: "1mb" }));
@@ -758,7 +644,7 @@ app.post('/api/sync-jobs', requireAuth, requireRole('admin'), async (req, res, n
     res.status(202).json({ job });
   } catch (err) { next(err); }
 });
-app.get('/api/sync-jobs', requireAuth, async (req, res, next) => {
+app.get('/api/sync-jobs', requireAuth, requireRole('teacher', 'admin'), async (req, res, next) => {
   try {
     const jobs = listSyncJobs({ user: req.user });
     res.json({ jobs });
@@ -782,7 +668,7 @@ app.get('/api/sync-jobs/:id/logs', requireAuth, async (req, res, next) => {
     res.json({ logs: getSyncJobLogs(req.params.id, { after: Number(req.query.after || 0) }) });
   } catch (err) { next(err); }
 });
-app.get('/api/sync-jobs/:id/events', async (req, res, next) => {
+app.get('/api/sync-jobs/:id/events', requireAuth, async (req, res, next) => {
   try {
     const job = getSyncJob(req.params.id);
     if (!job) return res.status(404).end();
@@ -795,11 +681,9 @@ app.get('/api/sync-jobs/:id/events', async (req, res, next) => {
     res.flushHeaders();
     res.write('retry: 2000\n\n');
     res.write('data: ' + JSON.stringify({ job, logs: getSyncJobLogs(req.params.id).slice(-20) }) + '\n\n');
-    const eventName = syncEngine.progressEvent(req.params.id);
-    const listener = (payload) => res.write('data: ' + JSON.stringify(payload) + '\n\n');
-    syncEngine.listen(eventName, listener);
+    const unsubscribe = syncEngine.onProgress(req.params.id, (payload) => res.write('data: ' + JSON.stringify(payload) + '\n\n'));
     const heartbeat = setInterval(() => res.write(': ping\n\n'), 15000);
-    req.on('close', () => { clearInterval(heartbeat); syncEngine.removeListener(eventName, listener); });
+    req.on('close', () => { clearInterval(heartbeat); unsubscribe(); });
   } catch (err) { next(err); }
 });
 
@@ -818,39 +702,60 @@ app.use((error, _req, res, _next) => {
 });
 
 fs.mkdir(uploadDir, { recursive: true })
-  .then(() => app.listen(port, () => {
-    console.log(`Course Trace API running at http://localhost:${port}`);
+  .then(() => {
+    // 服务重启后，遗留的 pending/running 任务不会再被执行，统一标记为失败
+    const recovered = recoverInterruptedSyncJobs();
+    if (recovered > 0) console.log(`[sync] ${recovered} 个中断的同步任务已标记为失败`);
+    app.listen(port, () => {
+      console.log(`Course Trace API running at http://localhost:${port}`);
 
-    // 定时自动同步：每天 03:00 检查一次 Canvas 新资料（可配置）
-    const AUTO_SYNC_INTERVAL_MS = Number(process.env.AUTO_SYNC_INTERVAL_MS || 24 * 60 * 60 * 1000);
-    const shouldRunNow = () => {
-      const h = new Date().getHours();
-      // 每轮都检查；为避免反复立即执行，首轮等待一个完整周期
-      return false;
-    };
-    const runAutoSync = async () => {
-      if (canvas.hasToken() && !canvas.MODE_DEACTIVATED) {
-        const courses = canvas.listCourses ? canvas.listCourses() : [];
+      const runAutoSync = async () => {
+        if (!canvas.hasToken()) {
+          console.log("[auto-sync] 未配置 Canvas token，跳过自动同步");
+          return;
+        }
+        const listing = canvas.listCourses();
+        const courses = Array.isArray(listing) ? listing : ((listing && listing.courses) || []);
         console.log(`[auto-sync] 扫描 ${courses.length} 门课的 Canvas 资料`);
         for (const course of courses) {
           try {
             const raw = await canvas.collectCourseFiles(course.id);
-            const entries = Array.isArray(raw) ? raw : (raw.items || raw.entries || []);
+            const entries = Array.isArray(raw) ? raw : ((raw && (raw.items || raw.entries)) || []);
             if (entries.length > 0) {
               console.log(`[auto-sync] 课程 ${course.name}: 采集到 ${entries.length} 份资料`);
             }
-          } catch (e) {
-            console.error(`[auto-sync] 课程 ${course.name} 同步失败:`, e.message);
+          } catch (error) {
+            console.error(`[auto-sync] 课程 ${course.name} 同步失败:`, error.message);
           }
         }
+      };
+      const logAutoSyncError = (error) => console.error("[auto-sync] 执行失败:", error.message);
+
+      const interval = Number(process.env.AUTO_SYNC_INTERVAL_MS || 24 * 60 * 60 * 1000);
+      if (!Number.isFinite(interval) || interval <= 0) {
+        console.log("[auto-sync] 已通过 AUTO_SYNC_INTERVAL_MS=0 关闭定时同步");
+      } else if (interval >= 24 * 60 * 60 * 1000) {
+        // 每天本地时间 03:00 执行一次；执行后重新排下一次
+        const scheduleNext = () => {
+          const now = new Date();
+          const next = new Date(now);
+          next.setHours(3, 0, 0, 0);
+          if (next <= now) next.setDate(next.getDate() + 1);
+          const timer = setTimeout(async () => {
+            try { await runAutoSync(); } catch (error) { logAutoSyncError(error); }
+            scheduleNext();
+          }, next.getTime() - now.getTime());
+          if (timer.unref) timer.unref();
+        };
+        scheduleNext();
+        console.log("[auto-sync] 每天 03:00 自动同步已启用");
       } else {
-        console.log("[auto-sync] 未配置 Canvas token，跳过自动同步");
+        const timer = setInterval(() => { runAutoSync().catch(logAutoSyncError); }, interval);
+        if (timer.unref) timer.unref();
+        console.log(`[auto-sync] 定时同步已启用，周期 ${Math.round(interval / 1000)} 秒`);
       }
-    };
-    // 首轮延迟一个周期(默认24h)再启动；便于服务稳定后再执行
-    setInterval(runAutoSync, AUTO_SYNC_INTERVAL_MS);
-    console.log(`[auto-sync] 定时同步已启用，周期 ${Math.round(AUTO_SYNC_INTERVAL_MS / 3600000)} 小时`);
-  }))
+    });
+  })
   .catch(error => {
     console.error("Failed to initialize upload directory", error);
     process.exitCode = 1;

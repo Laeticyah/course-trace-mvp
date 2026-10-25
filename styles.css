@@ -68,3 +68,6 @@
 
 .material-row-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap}.material-row .download-link{padding:6px 10px;font-size:11px}.material-row .download-link::before{content:"}
 
+
+.sync-log-line{display:flex;gap:8px;font-size:11px;line-height:1.6}.sync-log-line time{color:#9aaab4;font-family:"DM Mono",monospace;flex:none}.sync-log-line .sync-log-warn{color:#b07a2a}.sync-log-line .sync-log-error{color:#c0524a}.sync-log-line .sync-log-success{color:#2e8b57}
+

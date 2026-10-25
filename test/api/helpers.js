@@ -33,6 +33,9 @@ async function startServer() {
       PORT: String(port),
       DB_FILE: path.join(tempDir, "test.sqlite"),
       UPLOAD_DIR: path.join(tempDir, "uploads"),
+      // 测试不访问真实 Canvas，固定走 mock 采集
+      CANVAS_MODE: "mock",
+      CANVAS_MOCK_MODE: "true",
       NODE_ENV: "test"
     }
   });

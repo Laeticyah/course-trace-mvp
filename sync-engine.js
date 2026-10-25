@@ -15,6 +15,8 @@ const crypto = require("node:crypto");
 const path = require("node:path");
 const canvas = require("./canvas");
 const dbModule = require("./database");
+const { normalizeMaterial } = require("./lib/material");
+const { applyAuthority } = require("./lib/authority");
 const { getSyncJob, updateSyncJob, appendSyncJobLog } = dbModule;
 
 // ---- 运行时默认值（可被环境变量覆盖） ----
@@ -68,6 +70,16 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+/** 工具：给异步操作加超时（超时抛 SYNC_TIMEOUT，不阻塞队列） */
+function withTimeout(promise, ms, message) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(Object.assign(new Error(message || "操作超时"), { code: "SYNC_TIMEOUT" })), ms);
+    if (timer.unref) timer.unref();
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 /**
  * 核心同步流程。阻塞式执行一次全部同步逻辑。
  * @param {string} jobId
@@ -76,6 +88,13 @@ async function executeSyncJob(jobId) {
   const job = dbModule.getSyncJob(jobId);
   if (!job) {
     throw new Error("JOB_NOT_FOUND:" + jobId);
+  }
+  // 全局同步尚未实现：避免把 null 当 courseId 生成一条“null 课程”的脏数据
+  if (!job.courseId) {
+    updateSyncJob(jobId, { status: "failed", error: "全局同步暂未实现，请按课程触发同步", currentStep: "failed" });
+    appendSyncJobLog(jobId, "error", "全局同步暂未实现，请按课程触发同步");
+    emitProgress(jobId, { job: dbModule.getSyncJob(jobId), event: "failed" });
+    return;
   }
 
   appendSyncJobLog(jobId, "info", "任务进入执行队列");
@@ -88,19 +107,40 @@ async function executeSyncJob(jobId) {
   try {
     const deadline = startedAt + SYNC_TIMEOUT_MS;
 
-    // 1.1) 采集
+    // 1.1) 采集（带超时与有限重试）
     appendSyncJobLog(jobId, "info", "正在从 Canvas 抓取课程数据…");
     const courseId = job.courseId;
 
-    // 尝试真实采集；失败时降级到 mock（延续既有语义）
     let collected;
-    try {
-      const raw = await canvas.collectCourseFiles(courseId);
-      collected = normalizeCollection(raw, courseId);
-      appendSyncJobLog(jobId, "info", "Canvas 采集完成，共 " + collected.length + " 条记录");
-    } catch (collectErr) {
-      appendSyncJobLog(jobId, "warn", "真实采集失败，降级调用 mock： " + (collectErr.message || collectErr));
-      collected = mockCollect(courseId);
+    let lastCollectError = null;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      try {
+        updateSyncJob(jobId, { attempts: attempt });
+        const raw = await withTimeout(canvas.collectCourseFiles(courseId), SYNC_TIMEOUT_MS, "Canvas 采集超时");
+        const collection = normalizeCollection(raw, courseId);
+        const mode = raw && raw.mode ? raw.mode : "unknown";
+        if (mode === "mock" && !collection.length) {
+          throw new Error("Canvas 采集结果为空");
+        }
+        collected = collection;
+        appendSyncJobLog(jobId, "info", "Canvas 采集完成（" + mode + "），共 " + collected.length + " 条记录");
+        break;
+      } catch (collectErr) {
+        lastCollectError = collectErr;
+        appendSyncJobLog(jobId, "warn", "采集失败（第 " + attempt + "/" + MAX_ATTEMPTS + " 次）：" + (collectErr.message || collectErr));
+        if (attempt < MAX_ATTEMPTS) {
+          await sleep(Math.min(RETRY_MAX_DELAY_MS, RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1)));
+        }
+      }
+    }
+    if (!collected) {
+      // 仅在 mock 模式下允许用演示数据兜底；真实模式失败不再静默写入虚构资料
+      if (canvas.MODE === "mock") {
+        appendSyncJobLog(jobId, "warn", "使用本地演示数据完成同步：" + (lastCollectError ? lastCollectError.message : ""));
+        collected = mockCollect(courseId);
+      } else {
+        throw lastCollectError || new Error("Canvas 采集失败");
+      }
     }
 
     // 1.2) 下载（增量）
@@ -132,23 +172,33 @@ async function executeSyncJob(jobId) {
 
     for (const entry of collected) {
       const existing = findExistingMaterial(course, entry.name, entry.source);
-      if (existing) {
-        // 已有 → 版本是否变化
+      const versionChanged = Boolean(existing) && String(existing.version) !== String(entry.version || "V1.0");
+
+      // 同版本：只补全缺失的文件信息，不新建版本
+      if (existing && !versionChanged) {
         if (!existing.filePath && entry.filePath) {
           existing.filePath = entry.filePath;
           existing.fileHash = entry.fileHash || existing.fileHash;
           existing.fileSize = entry.fileSize ?? existing.fileSize;
+          existing.fileName = existing.fileName || entry.name;
           updated.push(entry.name);
           appendSyncJobLog(jobId, "info", "补全文件路径：" + entry.name);
-        } else if (existing.version !== entry.version) {
-          existing.version = entry.version;
-          existing.date = entry.date || existing.date;
-          updated.push(entry.name);
-          appendSyncJobLog(jobId, "info", "版本升级：" + entry.name + " → " + entry.version);
         } else {
           skipped.push(entry.name);
         }
         continue;
+      }
+
+      // 新资料 / 版本升级：升级时把旧版本标记归档，新版本进入同一版本链
+      const chainId = existing ? existing.versionChainId : crypto.randomUUID();
+      if (versionChanged) {
+        for (const item of course.materials) {
+          if (item.versionChainId === chainId && item.status !== "archived") {
+            item.status = "archived";
+            item.statusText = "已归档";
+            item.isAuthoritative = false;
+          }
+        }
       }
 
       const material = normalizeMaterial({
@@ -156,12 +206,12 @@ async function executeSyncJob(jobId) {
         type: entry.type || "课件",
         source: entry.source || "Canvas",
         version: entry.version || "V1.0",
-        date: entry.date || new Date().toISOString().slice(0, 10).replaceAll("-", "."),
+        date: entry.date || undefined,
         fileHash: entry.fileHash || null,
-        fileName: entry.fileName || null,
+        fileName: entry.fileName || entry.name || null,
         fileSize: entry.fileSize ?? null,
         filePath: entry.filePath || null,
-        versionChainId: crypto.randomUUID(),
+        versionChainId: chainId,
       });
       if (entry.text) {
         material.extractedText = {
@@ -176,8 +226,13 @@ async function executeSyncJob(jobId) {
       course.materials.unshift(material);
       course.count += 1;
       if (material.status === "official") course.official += 1;
-      added.push(material.name);
-      appendSyncJobLog(jobId, "info", "新增资料：" + material.name + " (" + material.version + ")");
+      if (versionChanged) {
+        updated.push(material.name);
+        appendSyncJobLog(jobId, "info", "版本升级：" + material.name + " → " + material.version);
+      } else {
+        added.push(material.name);
+        appendSyncJobLog(jobId, "info", "新增资料：" + material.name + " (" + material.version + ")");
+      }
     }
 
     course.updates = "刚刚更新";
@@ -262,12 +317,15 @@ function mockCollect(courseId) {
 
 async function downloadIncremental(courseId, entries, jobId) {
   const fsP = require("node:fs/promises");
-  const dir = path.join(__dirname, "uploads", String(courseId));
+  const uploadRoot = process.env.UPLOAD_DIR ? path.resolve(process.env.UPLOAD_DIR) : path.join(__dirname, "uploads");
+  const dir = path.join(uploadRoot, String(courseId));
   await fsP.mkdir(dir, { recursive: true });
 
   let count = 0;
   for (const entry of entries) {
     if (!entry.url) continue;
+    // 演示数据里的假地址不发起真实网络请求
+    if (String(entry.url).startsWith("https://mock/")) continue;
     const filename = (entry.name || "file").replace(/[\\/:*?"<>|]/g, "_");
     const localPath = path.join(dir, filename);
     try {
@@ -281,7 +339,7 @@ async function downloadIncremental(courseId, entries, jobId) {
       if (resp.ok) {
         const buf = Buffer.from(await resp.arrayBuffer());
         await fsP.writeFile(localPath, buf);
-        entry.filePath = path.relative(process.cwd(), localPath);
+        entry.filePath = path.relative(__dirname, localPath);
         entry.fileHash = crypto.createHash("sha256").update(buf).digest("hex");
         entry.fileSize = buf.length;
         count++;
@@ -295,29 +353,6 @@ async function downloadIncremental(courseId, entries, jobId) {
 
 function findExistingMaterial(course, name, source) {
   return (course.materials || []).find((m) => m.name === name && (m.source === source || m.source === "Canvas"));
-}
-
-function applyAuthority(courses) {
-  try {
-    const { applyAuthority } = require("./server-utils.js") || {};
-    if (typeof applyAuthority === "function") {
-      applyAuthority(courses);
-      return;
-    }
-  } catch (_) {}
-  // 简化版：就地重算权威标记
-  for (const c of courses || []) {
-    const mats = c.materials || [];
-    for (const m of mats) {
-      m.authorityScore = m.authorityScore ?? (m.source === "Canvas" ? 0.5 : 0.3);
-      const top = [...mats]
-        .filter((x) => x.isAuthoritative)
-        .sort((a, b) => (b.authorityScore || 0) - (a.authorityScore || 0))[0];
-      if (top && top.id === m.id) {
-        m.isAuthoritative = true;
-      }
-    }
-  }
 }
 
 /**
