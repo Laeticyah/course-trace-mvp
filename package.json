@@ -7,7 +7,9 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "test": "node --test test/regression.test.js"
+    "test": "node --test test/*.test.js",
+    "test:unit": "node --test test/unit/*.test.js",
+    "test:api": "node --test test/api/*.test.js"
   },
   "dependencies": {
     "express": "^4.21.2",
