@@ -311,6 +311,41 @@ function normalizeCollection(raw, courseId) {
   }));
 }
 
+/** 下载 Canvas 文件到 uploads/<courseId>/（增量：已存在非空文件则跳过） */
+async function downloadIncremental(courseId, entries, jobId) {
+  const fsP = require("node:fs/promises");
+  const uploadRoot = process.env.UPLOAD_DIR ? path.resolve(process.env.UPLOAD_DIR) : path.join(__dirname, "uploads");
+  const dir = path.join(uploadRoot, String(courseId));
+  await fsP.mkdir(dir, { recursive: true });
+
+  let count = 0;
+  for (const entry of entries) {
+    if (!entry.url) continue;
+    const filename = (entry.fileName || entry.name || "file").replace(/[\\/:*?"<>|]/g, "_");
+    const localPath = path.join(dir, filename);
+    try {
+      const stat = await fsP.stat(localPath);
+      if (stat.size > 0) continue;
+    } catch (_) { /* 文件不存在则下载 */ }
+    try {
+      const resp = await fetch(entry.url, { headers: canvas.getAuthHeaders() });
+      if (resp.ok) {
+        const buf = Buffer.from(await resp.arrayBuffer());
+        await fsP.writeFile(localPath, buf);
+        entry.filePath = path.relative(__dirname, localPath);
+        entry.fileHash = crypto.createHash("sha256").update(buf).digest("hex");
+        entry.fileSize = buf.length;
+        count++;
+      } else {
+        appendSyncJobLog(jobId, "warn", "文件下载失败（HTTP " + resp.status + "）：" + filename);
+      }
+    } catch (error) {
+      appendSyncJobLog(jobId, "warn", "文件下载失败：" + filename + "，" + (error.message || error));
+    }
+  }
+  return count;
+}
+
 function findExistingMaterial(course, name, source) {
   return (course.materials || []).find((m) => m.name === name && (m.source === source || m.source === "Canvas"));
 }
@@ -348,4 +383,5 @@ module.exports = {
   enqueueSyncJob,
   executeSyncJob,
   normalizeCollection,
+  downloadIncremental,
 };
