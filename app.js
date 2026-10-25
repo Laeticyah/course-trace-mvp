@@ -46,7 +46,8 @@ function renderAlerts(){
 }
 function renderCourseList(){
   $("#course-list").innerHTML = courses.map(c => `<div class="course-list-item ${selectedCourse===c.id?"selected":""}" data-select-course="${c.id}">${courseDot(c.color)}<div><strong>${c.name}</strong><small>${c.count} 份资料 · ${c.official} 份官方</small></div></div>`).join("");
-  $("#course-count").textContent = courses.length + " 门";
+  var courseCountEl = document.getElementById("course-count");
+  if (courseCountEl) courseCountEl.textContent = courses.length + " 门";
   syncSidebarStats();
   renderCourseDetail();
 }
