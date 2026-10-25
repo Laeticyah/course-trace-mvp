@@ -1,80 +1,23 @@
 "use strict";
 
 /**
- * 接口测试 · REST API
- * 运行方式: node --test test/api/
- * 说明: 自动启动独立 server 进程，测试结束后自动关闭
+ * 接口测试 · REST API（隔离实例：临时 SQLite + 临时 uploads + 随机端口）
+ * 运行方式: npm run test:api
  */
 
 const { describe, it, before, after } = require("node:test");
 const assert = require("node:assert/strict");
-const { execFile } = require("node:child_process");
-const path = require("node:path");
+const { getBase, startServer, stopServer, login, auth } = require("./helpers");
 
-const BASE = "http://localhost:4174"; // 使用独立端口，避免与回归测试冲突
-const ROOT = path.resolve(__dirname, "..", ".."); // 仓库根目录
-const SERVER_ENTRY = path.join(ROOT, "server.js");
-
-let serverProcess = null;
 let adminToken = null;
 let studentToken = null;
-
-function startServer() {
-  return new Promise((resolve, reject) => {
-    serverProcess = execFile(process.execPath, [SERVER_ENTRY], {
-      cwd: ROOT,
-      env: { ...process.env, PORT: "4174" },
-    });
-    serverProcess.stdout && serverProcess.stdout.on("data", (d) => console.log("[server]", d.toString().trim()));
-    serverProcess.stderr && serverProcess.stderr.on("data", (d) => {
-      if (!d.toString().includes("DeprecationWarning")) {
-        console.error("[server:err]", d.toString().trim());
-      }
-    });
-    serverProcess.on("error", (err) => reject(err));
-
-    // 轮询等待 server 就绪（最多 8s）
-    const deadline = Date.now() + 8000;
-    const probe = () => {
-      fetch(BASE + "/api/health").then(() => resolve()).catch((err) => {
-        if (Date.now() > deadline) {
-          reject(new Error("server 启动超时，最近错误: " + err.message));
-        } else {
-          setTimeout(probe, 250);
-        }
-      });
-    };
-    probe();
-  });
-}
-
-function stopServer() {
-  return new Promise((resolve) => {
-    if (!serverProcess) return resolve();
-    serverProcess.kill();
-    setTimeout(resolve, 200);
-  });
-}
-
-async function login(username, password) {
-  const res = await fetch(BASE + "/api/auth/login", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ username, password })
-  });
-  if (res.status !== 200) {
-    throw new Error(`登录失败 ${username}: ${res.status}`);
-  }
-  const data = await res.json();
-  return data.token;
-}
 
 before(async () => { await startServer(); });
 after(async () => { await stopServer(); });
 
 describe("健康检查", () => {
   it("GET /api/health 返回 200 且 ok:true", async () => {
-    const res = await fetch(BASE + "/api/health");
+    const res = await fetch(getBase() + "/api/health");
     assert.equal(res.status, 200);
     const data = await res.json();
     assert.equal(data.ok, true);
@@ -84,52 +27,75 @@ describe("健康检查", () => {
 
 describe("认证", () => {
   it("未认证访问 /api/dashboard 返回 401", async () => {
-    const res = await fetch(BASE + "/api/dashboard");
+    const res = await fetch(getBase() + "/api/dashboard");
     assert.equal(res.status, 401);
   });
 
-  it("管理员登录成功并返回 token", async () => {
+  it("管理员与测试账号登录成功", async () => {
     adminToken = await login("admin", "admin123");
-    assert.ok(adminToken, "应返回管理员 token");
+    studentToken = await login("student", "student123");
+    assert.ok(adminToken);
+    assert.ok(studentToken);
   });
 
-  it("学生登录成功并返回 token", async () => {
-    studentToken = await login("student", "student123");
-    assert.ok(studentToken, "应返回学生 token");
+  it("登出后 token 失效", async () => {
+    const token = await login("student", "student123");
+    const logout = await fetch(getBase() + "/api/auth/logout", { method: "POST", headers: auth(token) });
+    assert.equal(logout.status, 204);
+    const me = await fetch(getBase() + "/api/auth/me", { headers: auth(token) });
+    assert.equal(me.status, 401);
   });
 });
 
-describe("仪表盘", () => {
-  it("管理员 /api/dashboard 返回 courses 与 alerts 数组", async () => {
-    if (!adminToken) return;
-    const res = await fetch(BASE + "/api/dashboard", {
-      headers: { Authorization: `Bearer ${adminToken}` }
-    });
+describe("仪表盘与课程", () => {
+  it("管理员拿到 courses / alerts", async () => {
+    const res = await fetch(getBase() + "/api/dashboard", { headers: auth(adminToken) });
     assert.equal(res.status, 200);
     const data = await res.json();
     assert.ok(Array.isArray(data.courses));
+    assert.ok(data.courses.length >= 3);
     assert.ok(Array.isArray(data.alerts));
   });
-});
 
-describe("课程接口", () => {
-  it("管理员访问课程 97558 的资料成功", async () => {
-    if (!adminToken) return;
-    const res = await fetch(BASE + "/api/courses/97558/materials", {
-      headers: { Authorization: `Bearer ${adminToken}` }
-    });
-    assert.ok(res.status === 200 || res.status === 404, `响应 ${res.status}`);
+  it("学生只看到已加入课程（eng101）", async () => {
+    const res = await fetch(getBase() + "/api/dashboard", { headers: auth(studentToken) });
+    const data = await res.json();
+    const ids = data.courses.map((course) => course.id);
+    assert.ok(ids.includes("eng101"));
+    assert.ok(!ids.includes("math101"));
+  });
+
+  it("管理员读取 eng101 资料成功", async () => {
+    const res = await fetch(getBase() + "/api/courses/eng101/materials", { headers: auth(adminToken) });
+    assert.equal(res.status, 200);
+    const data = await res.json();
+    assert.ok(Array.isArray(data.materials));
+  });
+
+  it("学生可以加入/退出课程（成员角色 CHECK 已修复）", async () => {
+    const join = await fetch(getBase() + "/api/courses/math101/join", { method: "POST", headers: auth(studentToken) });
+    assert.equal(join.status, 201);
+    let dash = await (await fetch(getBase() + "/api/dashboard", { headers: auth(studentToken) })).json();
+    assert.ok(dash.courses.map((course) => course.id).includes("math101"));
+
+    const leave = await fetch(getBase() + "/api/courses/math101/leave", { method: "DELETE", headers: auth(studentToken) });
+    assert.equal(leave.status, 204);
+    dash = await (await fetch(getBase() + "/api/dashboard", { headers: auth(studentToken) })).json();
+    assert.ok(!dash.courses.map((course) => course.id).includes("math101"));
+  });
+
+  it("访问不存在的课程返回 404", async () => {
+    const res = await fetch(getBase() + "/api/courses/no-such-course/materials", { headers: auth(adminToken) });
+    assert.equal(res.status, 404);
   });
 });
 
-describe("搜索接口", () => {
-  it("带 token 搜索返回结果数组", async () => {
-    if (!adminToken) return;
-    const res = await fetch(BASE + "/api/search?q=%E8%AF%BE%E4%BB%B6&limit=10", {
-      headers: { Authorization: `Bearer ${adminToken}` }
-    });
+describe("搜索", () => {
+  it("中文关键词可检索到资料", async () => {
+    const res = await fetch(getBase() + "/api/search?q=" + encodeURIComponent("需求分析") + "&limit=10", { headers: auth(adminToken) });
     assert.equal(res.status, 200);
     const data = await res.json();
     assert.ok(Array.isArray(data.results));
+    assert.ok(data.count > 0, "中文检索应有结果");
   });
 });

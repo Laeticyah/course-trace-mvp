@@ -28,7 +28,9 @@ npm start
 | POST | `/api/auth/login` | 登录并获取 Bearer Token |
 | GET | `/api/auth/me` | 获取当前登录用户 |
 | POST | `/api/auth/logout` | 注销当前会话 |
-| PUT | `/api/materials/:materialId/review` | 教师/管理员确认或撤销资料审核 |
+| PUT | `/api/materials/:materialId/review` | 教师/管理员确认或撤销资料审核（仅限自己课程） |
+| GET | `/api/materials/:materialId/file` | 鉴权下载资料附件（Bearer Token） |
+| GET | `/api/search?q=需求` | 中文全文检索（FTS5 + LIKE 兜底） |
 | GET | `/api/me/courses` | 获取当前用户已加入的课程 |
 | POST | `/api/courses/:courseId/join` | 学生加入课程 |
 | DELETE | `/api/courses/:courseId/leave` | 学生退出课程 |
@@ -59,35 +61,48 @@ curl.exe -X POST http://localhost:4173/api/materials/upload `
 
 ## 权威版本评分
 
-服务端按以下可解释规则计算 `authorityScore`：
+服务端按五因子加权计算 `authorityScore`（`server.js` 的 `calculateAuthority`）：
 
 ```text
-权威度 = 来源权威度 × 50% + 时间新度 × 30% + 内容变更度 × 20%
+权威度 = 来源权威度 × 35% + 时间新度 × 20% + 内容变更度 × 15% + 教师审核 × 20% + 内容完整度 × 10%
 ```
 
-来源权威度默认排序为 Canvas（1.00）、教师上传（0.95）、知途好课（0.92）、班级群（0.58）、网盘（0.48）、转发（0.40）。同一 `versionChainId` 内分数最高的资料会标记为 `isAuthoritative: true`，并显示“最新权威版”；其他官方资料显示“官方历史版”。
+来源权威度默认排序为 Canvas（1.00）、教师上传（0.95）、知途好课（0.92）、班级群（0.58）、网盘（0.48）、转发（0.40）。同一 `versionChainId` 内：教师审核通过的版本优先，否则取分数最高的未归档版本，标记为 `isAuthoritative: true` 并显示“最新权威版”；被新版本替代的旧版本自动归档（`status: archived`），不再参与当前权威版评选。
 
 ## 已实现
 
 - 课程资料总览：课程卡片、资料数量、治理进度、最近更新
-- 可信检索：课程关键词搜索、官方资料/学生整理/最近更新筛选入口
-- 课程详情：资料来源、版本号、权威状态和版本时间线
+- 可信检索：中文关键词全文检索（FTS5 trigram + LIKE 兜底）、官方/学生整理/最近更新筛选入口
+- 课程详情：资料来源、版本号、权威状态和真实版本时间线
 - 变更提醒：官方课件和作业要求更新提醒、已读状态
-- 历史归档：被替代版本的可回溯列表
-- 资料登记：模拟接入资料后生成版本链并刷新界面
-- 响应式布局：适配窄屏和移动端宽度
+- 历史归档：被替代版本的可回溯列表（上传新版本时自动归档旧版本）
+- 资料登记与上传：SHA-256 判重、版本链识别、文件落盘与鉴权下载
+- 权限：管理员可管理全部课程；教师只能管理自己担任教师的课程；学生只能查看已加入课程
+
+## 测试
+
+```powershell
+npm test           # 单元测试 + 接口/安全测试（临时 SQLite + 临时 uploads + 随机端口，不碰开发库）
+npm run test:unit  # 纯逻辑单元测试
+npm run test:api   # 接口与安全测试
+npm run test:regression  # 演示数据回归测试（需要 4173 上已启动演示服务）
+```
+
+## 运行配置
+
+除 `PORT` 外，`DB_FILE` 与 `UPLOAD_DIR` 可覆盖数据库与上传目录（默认 `./course-trace.sqlite` 与 `./uploads/`），便于测试或换机演示。
 
 ## 真实接入边界
 
-当前使用本地 SQLite 数据库 `course-trace.sqlite` 保存课程、资料、版本链和提醒。首次启动会自动把已有 `data.json` 导入 SQLite；之后接口读写数据库，不再依赖 JSON 文件。仍未接入 Canvas、知途好课、班级群或网盘，正式部署时可继续将 SQLite 迁移到 MySQL/PostgreSQL。
+当前使用本地 SQLite 数据库 `course-trace.sqlite` 保存课程、资料、版本链和提醒。首次启动会自动把已有 `data.json` 导入 SQLite；之后接口读写数据库，不再依赖 JSON 文件。Canvas 采集为实验性接入（配置 `CANVAS_TOKEN` 后可用，演示默认走 mock 数据），知途好课、班级群、网盘尚未接入；正式部署时可继续将 SQLite 迁移到 MySQL/PostgreSQL。
 
 ## 演示账号与权限
 
 | 账号 | 密码 | 角色 | 权限 |
 | --- | --- | --- | --- |
-| `student` | `student123` | 学生 | 查看资料、查看提醒 |
-| `teacher` | `teacher123` | 教师 | 学生权限 + 上传和登记资料 |
-| `admin` | `admin123` | 管理员 | 教师权限 + 管理能力预留 |
+| `student` | `student123` | 学生 | 查看已加入课程资料、查看提醒 |
+| `teacher` | `teacher123` | 教师 | 学生权限 + 仅在担任教师的课程内上传/登记/审核/归档资料 |
+| `admin` | `admin123` | 管理员 | 全部课程的治理权限 + 同步任务管理 |
 
 上传资料和标记提醒已读需要在请求头中携带：
 

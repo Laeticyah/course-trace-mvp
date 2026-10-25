@@ -352,6 +352,21 @@ function canViewCourse(user, courseId) {
   return Boolean(getMembership(courseId, user.id));
 }
 
+/* 写操作权限：管理员可操作任意课程；教师只能操作自己担任教师的课程 */
+function isCourseTeacher(user, courseId) {
+  if (!user) return false;
+  if (user.role === "admin") return true;
+  if (user.role !== "teacher") return false;
+  const membership = getMembership(courseId, user.id);
+  return Boolean(membership && membership.member_role === "teacher");
+}
+
+function ensureCourseTeacher(user, courseId, res) {
+  if (isCourseTeacher(user, courseId)) return true;
+  res.status(403).json({ error: "COURSE_ACCESS_DENIED", message: "你不是该课程的教师，无权执行此操作" });
+  return false;
+}
+
 app.get("/api/dashboard", requireAuth, async (_req, res, next) => {
   try {
     const user = currentUser(_req);
@@ -515,16 +530,12 @@ app.delete("/api/courses/:courseId/leave", requireAuth, requireRole("student"), 
 });
 
 app.get("/api/courses/:courseId/members", requireAuth, requireRole("teacher", "admin"), (req, res) => {
-  if (req.user.role === "teacher" && !getMembership(req.params.courseId, req.user.id)) {
-    return res.status(403).json({ error: "COURSE_ACCESS_DENIED", message: "你不是该课程教师" });
-  }
+  if (!ensureCourseTeacher(req.user, req.params.courseId, res)) return;
   res.json({ members: listCourseMembers(req.params.courseId) });
 });
 
 app.post("/api/courses/:courseId/members", requireAuth, requireRole("teacher", "admin"), (req, res) => {
-  if (req.user.role === "teacher" && !getMembership(req.params.courseId, req.user.id)) {
-    return res.status(403).json({ error: "COURSE_ACCESS_DENIED", message: "你不是该课程教师" });
-  }
+  if (!ensureCourseTeacher(req.user, req.params.courseId, res)) return;
   const { userId, memberRole = "student" } = req.body || {};
   const membership = addCourseMember(req.params.courseId, userId, memberRole);
   if (!membership) return res.status(404).json({ error: "MEMBER_OR_COURSE_NOT_FOUND", message: "用户或课程不存在" });
@@ -532,14 +543,16 @@ app.post("/api/courses/:courseId/members", requireAuth, requireRole("teacher", "
 });
 
 app.delete("/api/courses/:courseId/members/:userId", requireAuth, requireRole("teacher", "admin"), (req, res) => {
-  if (req.user.role === "teacher" && !getMembership(req.params.courseId, req.user.id)) {
-    return res.status(403).json({ error: "COURSE_ACCESS_DENIED", message: "你不是该课程教师" });
-  }
+  if (!ensureCourseTeacher(req.user, req.params.courseId, res)) return;
   if (!removeCourseMember(req.params.courseId, req.params.userId)) return res.status(404).json({ error: "MEMBERSHIP_NOT_FOUND", message: "成员不存在" });
   res.status(204).end();
 });
 
 app.put("/api/materials/:materialId/review", requireAuth, requireRole("teacher", "admin"), (req, res) => {
+  const data = readData();
+  const found = findMaterialById(data, req.params.materialId);
+  if (!found) return res.status(404).json({ error: "MATERIAL_NOT_FOUND", message: "资料不存在" });
+  if (!ensureCourseTeacher(req.user, found.course.id, res)) return;
   const { status, note } = req.body || {};
   const material = reviewMaterial(req.params.materialId, req.user, status, note);
   if (!material) return res.status(404).json({ error: "MATERIAL_NOT_FOUND", message: "资料不存在或审核状态无效" });
@@ -554,15 +567,23 @@ app.put("/api/materials/:materialId/review", requireAuth, requireRole("teacher",
   });
 });
 
-// 归档或恢复资料（管理员 / 教师）
+// 归档或恢复资料（管理员 / 课程教师）
 app.put("/api/materials/:materialId/archive", requireAuth, requireRole("teacher", "admin"), (req, res) => {
+  const data = readData();
+  const found = findMaterialById(data, req.params.materialId);
+  if (!found) return res.status(404).json({ error: "MATERIAL_NOT_FOUND", message: "资料不存在" });
+  if (!ensureCourseTeacher(req.user, found.course.id, res)) return;
   const material = setArchived(req.params.materialId, req.user, (req.body && req.body.archived) !== false);
   if (!material) return res.status(404).json({ error: "MATERIAL_NOT_FOUND", message: "资料不存在或无权操作" });
   res.json({ material: { id: material.id, status: material.status, statusText: material.status_text } });
 });
 
-// 物理删除资料（管理员 / 教师）
+// 物理删除资料（管理员 / 课程教师）
 app.delete("/api/materials/:materialId", requireAuth, requireRole("teacher", "admin"), (req, res) => {
+  const data = readData();
+  const found = findMaterialById(data, req.params.materialId);
+  if (!found) return res.status(404).json({ error: "MATERIAL_NOT_FOUND", message: "资料不存在" });
+  if (!ensureCourseTeacher(req.user, found.course.id, res)) return;
   const result = removeMaterial(req.params.materialId, req.user);
   if (!result) return res.status(404).json({ error: "MATERIAL_NOT_FOUND", message: "资料不存在或无权删除" });
   res.json({ deleted: true, id: result.id || req.params.materialId });
@@ -575,6 +596,7 @@ app.post("/api/materials", requireAuth, requireRole("teacher", "admin"), async (
     const data = readData();
     const course = data.courses.find(item => item.id === courseId);
     if(!course) return res.status(404).json({ error: "COURSE_NOT_FOUND", message: "课程不存在" });
+    if(!ensureCourseTeacher(req.user, courseId, res)) return;
     const previous = course.materials.find(item => item.name === name && item.type === type);
     const versionChainId = previous ? previous.versionChainId : crypto.randomUUID();
     archivePreviousVersions(course, versionChainId);
@@ -611,6 +633,10 @@ app.post("/api/materials/upload", requireAuth, requireRole("teacher", "admin"), 
     if(!course) {
       await fs.rm(req.file.path, { force: true });
       return res.status(404).json({ error: "COURSE_NOT_FOUND", message: "课程不存在" });
+    }
+    if(!ensureCourseTeacher(req.user, courseId, res)) {
+      await fs.rm(req.file.path, { force: true });
+      return;
     }
     const fileHash = await sha256(req.file.path);
     const features = await extractDocumentFeatures(req.file.path, req.file.originalname);
@@ -714,6 +740,11 @@ function jobLog(jobId, level, message, extra = null) {
 app.post('/api/courses/:courseId/sync', requireAuth, requireRole('teacher', 'admin'), async (req, res, next) => {
   try {
     const courseId = String(req.params.courseId);
+    const data = readData();
+    if (!data.courses.some(course => course.id === courseId)) {
+      return res.status(404).json({ error: 'COURSE_NOT_FOUND', message: '课程不存在' });
+    }
+    if (!ensureCourseTeacher(req.user, courseId, res)) return;
     const job = createSyncJob({ courseId, scope: 'course', createdBy: req.user.id });
     syncEngine.enqueueSyncJob(job.id);
     res.status(202).json({ job });

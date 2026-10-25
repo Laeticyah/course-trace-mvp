@@ -7,7 +7,7 @@ const databaseFile = process.env.DB_FILE
   ? path.resolve(process.env.DB_FILE)
   : path.join(__dirname, "course-trace.sqlite");
 const legacyDataFile = path.join(__dirname, "data.json");
-const db = new DatabaseSync(databaseFile);
+const db = new DatabaseSync(databaseFile, { timeout: 5000 });
 
 db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
 db.exec(`
@@ -88,7 +88,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS course_members (
     course_id TEXT NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
     user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    member_role TEXT NOT NULL CHECK (member_role IN ('teacher')),
+    member_role TEXT NOT NULL CHECK (member_role IN ('student', 'teacher')),
     joined_at TEXT NOT NULL,
     PRIMARY KEY (course_id, user_id)
   );
@@ -206,6 +206,37 @@ db.exec(`
   ensureColumn("material_files", "status", "TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived'))");
 })();
 
+// ---- 迁移：早期 course_members 的 CHECK 只允许 teacher，导致学生成员被静默丢弃 ----
+(function migrateCourseMemberRoles() {
+  try {
+    const row = db.prepare("SELECT sql FROM sqlite_master WHERE name = 'course_members'").get();
+    if (!row || !row.sql) return;
+    if (row.sql.includes("'student'")) return;
+    db.exec("PRAGMA foreign_keys = OFF");
+    db.exec("BEGIN IMMEDIATE");
+    db.exec(`
+      CREATE TABLE course_members_new (
+        course_id TEXT NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        member_role TEXT NOT NULL CHECK (member_role IN ('student', 'teacher')),
+        joined_at TEXT NOT NULL,
+        PRIMARY KEY (course_id, user_id)
+      );
+    `);
+    db.exec("INSERT INTO course_members_new (course_id, user_id, member_role, joined_at) SELECT course_id, user_id, member_role, joined_at FROM course_members");
+    db.exec("DROP TABLE course_members");
+    db.exec("ALTER TABLE course_members_new RENAME TO course_members");
+    db.exec("CREATE INDEX IF NOT EXISTS idx_course_members_user ON course_members(user_id)");
+    db.exec("COMMIT");
+    db.exec("PRAGMA foreign_keys = ON");
+    console.log("[database] 已迁移 course_members.member_role 约束（允许 student）");
+  } catch (error) {
+    try { db.exec("ROLLBACK"); } catch (_) { /* ignore */ }
+    try { db.exec("PRAGMA foreign_keys = ON"); } catch (_) { /* ignore */ }
+    console.warn("[database] 迁移 course_members 约束失败:", error.message);
+  }
+})();
+
 // ---- FTS5 全文搜索 ----
 // 说明: 使用独立的内容表，写入后全量重建（writeData/syncFTSIndex），避免 rowid 错位。
 // 中文检索使用 trigram 分词器（unicode61 不切分中文，导致“需求分析”这类查询 0 结果）。
@@ -311,44 +342,89 @@ function readData() {
 }
 
 function writeData(data) {
-  // 事务化：中途失败回滚，避免出现“删了旧数据但没写回新数据”的半截库
+  // 增量写入 + 事务：只 upsert 当前数据、删除已移除的记录，
+  // 不再“全表删光重插”，避免 rowid 抖动、级联清空历史表与并发覆盖。
   db.exec("BEGIN IMMEDIATE");
   try {
-    const memberships = db.prepare("SELECT * FROM course_members").all();
-    db.prepare("DELETE FROM materials").run();
-    db.prepare("DELETE FROM course_members").run();
-    db.prepare("DELETE FROM courses").run();
-    db.prepare("DELETE FROM alerts").run();
-    const insertCourse = db.prepare(`
+    const upsertCourse = db.prepare(`
       INSERT INTO courses (id, code, name, description, color, progress, official_count, updates)
       VALUES (@id, @code, @name, @description, @color, @progress, @official, @updates)
+      ON CONFLICT(id) DO UPDATE SET
+        code = excluded.code,
+        name = excluded.name,
+        description = excluded.description,
+        color = excluded.color,
+        progress = excluded.progress,
+        official_count = excluded.official_count,
+        updates = excluded.updates
     `);
-    const insertMaterial = db.prepare(`
+    const upsertMaterial = db.prepare(`
       INSERT INTO materials (
         id, course_id, name, type, source, version, date, status, status_text, icon,
         file_hash, file_name, file_size, file_path, version_chain_id, extracted_text,
-        similarity, version_reason, authority_score, authority_breakdown, is_authoritative
-        , review_status, reviewed_by, reviewed_at, review_note
+        similarity, version_reason, authority_score, authority_breakdown, is_authoritative,
+        review_status, reviewed_by, reviewed_at, review_note
       ) VALUES (
         @id, @courseId, @name, @type, @source, @version, @date, @status, @statusText, @icon,
         @fileHash, @fileName, @fileSize, @filePath, @versionChainId, @extractedText,
         @similarity, @versionReason, @authorityScore, @authorityBreakdown, @isAuthoritative,
         @reviewStatus, @reviewedBy, @reviewedAt, @reviewNote
       )
+      ON CONFLICT(id) DO UPDATE SET
+        course_id = excluded.course_id,
+        name = excluded.name,
+        type = excluded.type,
+        source = excluded.source,
+        version = excluded.version,
+        date = excluded.date,
+        status = excluded.status,
+        status_text = excluded.status_text,
+        icon = excluded.icon,
+        file_hash = excluded.file_hash,
+        file_name = excluded.file_name,
+        file_size = excluded.file_size,
+        file_path = excluded.file_path,
+        version_chain_id = excluded.version_chain_id,
+        extracted_text = excluded.extracted_text,
+        similarity = excluded.similarity,
+        version_reason = excluded.version_reason,
+        authority_score = excluded.authority_score,
+        authority_breakdown = excluded.authority_breakdown,
+        is_authoritative = excluded.is_authoritative,
+        review_status = excluded.review_status,
+        reviewed_by = excluded.reviewed_by,
+        reviewed_at = excluded.reviewed_at,
+        review_note = excluded.review_note
     `);
+    const deleteMaterial = db.prepare("DELETE FROM materials WHERE id = ?");
+    const deleteCourse = db.prepare("DELETE FROM courses WHERE id = ?");
+
+    const existingMaterialIds = new Set(db.prepare("SELECT id FROM materials").all().map((row) => row.id));
+    const existingCourseIds = new Set(db.prepare("SELECT id FROM courses").all().map((row) => row.id));
+    const keepMaterialIds = new Set();
+    const keepCourseIds = new Set();
+
     for (const course of data.courses) {
-      insertCourse.run({
+      keepCourseIds.add(course.id);
+      upsertCourse.run({
         id: course.id, code: course.code, name: course.name, description: course.desc,
         color: course.color, progress: course.progress, official: course.official, updates: course.updates
       });
-      for (const material of course.materials) insertMaterial.run(materialToRow(material, course.id));
-    }
-    const insertMember = db.prepare("INSERT OR IGNORE INTO course_members (course_id, user_id, member_role, joined_at) VALUES (?, ?, ?, ?)");
-    for (const member of memberships) {
-      if (data.courses.some(course => course.id === member.course_id)) {
-        insertMember.run(member.course_id, member.user_id, member.member_role, member.joined_at);
+      for (const material of course.materials) {
+        const row = materialToRow(material, course.id);
+        keepMaterialIds.add(row.id);
+        upsertMaterial.run(row);
       }
     }
+    for (const id of existingMaterialIds) {
+      if (!keepMaterialIds.has(id)) deleteMaterial.run(id);
+    }
+    for (const id of existingCourseIds) {
+      if (!keepCourseIds.has(id)) deleteCourse.run(id);
+    }
+
+    // alerts 目前没有稳定主键（按用户/已读改造前先整体替换，量很小）
+    db.prepare("DELETE FROM alerts").run();
     const insertAlert = db.prepare("INSERT INTO alerts (title, description, time, course, unread) VALUES (?, ?, ?, ?, ?)");
     for (const alert of data.alerts) insertAlert.run(alert.title, alert.desc, alert.time, alert.course, alert.unread ? 1 : 0);
     db.exec("COMMIT");
@@ -356,7 +432,7 @@ function writeData(data) {
     try { db.exec("ROLLBACK"); } catch (_) { /* ignore rollback failure */ }
     throw error;
   }
-  // 重插后 rowid 全部变化，必须同步重建 FTS，否则检索结果会错位
+  // 版本链/资料增删后重建 FTS，保证检索结果与资料表一致
   syncFTSIndex();
 }
 
@@ -392,10 +468,13 @@ function seedCourseMembers() {
   const courses = db.prepare("SELECT id FROM courses").all();
   const teacher = db.prepare("SELECT id FROM users WHERE username = 'teacher'").get();
   const student = db.prepare("SELECT id FROM users WHERE username = 'student'").get();
-  if (!teacher || !student || db.prepare("SELECT COUNT(*) AS count FROM course_members").get().count > 0) return;
+  if (!teacher || !student) return;
+  // 幂等补齐演示账号的课程成员关系；只覆盖演示课程，避免把 Canvas 同步进来的课程也“送”给教师
+  const DEMO_COURSE_IDS = new Set(["eng101", "math101", "ai101"]);
   const insert = db.prepare("INSERT OR IGNORE INTO course_members (course_id, user_id, member_role, joined_at) VALUES (?, ?, ?, ?)");
   const now = new Date().toISOString();
   for (const course of courses) {
+    if (!DEMO_COURSE_IDS.has(course.id)) continue;
     insert.run(course.id, teacher.id, "teacher", now);
     if (course.id === "eng101") insert.run(course.id, student.id, "student", now);
   }
