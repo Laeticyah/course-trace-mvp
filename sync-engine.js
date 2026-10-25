@@ -140,14 +140,7 @@ async function executeSyncJob(jobId) {
       }
     }
     if (!collected || collected.length === 0) {
-      // 仅在 mock 模式下允许用演示数据兜底；真实模式失败不再静默写入虚构资料
-      if (canvas.MODE === "mock") {
-        appendSyncJobLog(jobId, "warn", "使用本地演示数据完成同步：" + (lastCollectError ? lastCollectError.message : ""));
-        collected = mockCollect(courseId);
-      }
-      if (!collected || collected.length === 0) {
-        throw lastCollectError || new Error("CANVAS_EMPTY_COLLECTION");
-      }
+      throw lastCollectError || new Error("CANVAS_EMPTY_COLLECTION");
     }
 
     // 1.2) 下载（增量）
@@ -161,12 +154,16 @@ async function executeSyncJob(jobId) {
 
     const data = dbModule.readData();
     let course = data.courses.find((c) => String(c.id) === String(courseId));
+    const createdCourse = !course;
     if (!course) {
+      // 真实 Canvas 课程：先取课程名/代码，避免用数字 id 当课程名
+      let info = null;
+      try { info = await canvas.getCourseInfo(courseId); } catch (_) { info = null; }
       course = {
         id: String(courseId),
-        code: String(courseId).split("-")[0] || String(courseId),
-        name: String(courseId),
-        desc: "从 Canvas 自动创建",
+        code: (info && info.course && info.course.code) || String(courseId),
+        name: (info && info.course && info.course.name) || String(courseId),
+        desc: (info && info.course && info.course.desc) || "从 Canvas 同步创建",
         color: "blue",
         count: 0,
         progress: 0,
@@ -255,6 +252,10 @@ async function executeSyncJob(jobId) {
         unread: true,
       });
       dbModule.writeData(data);
+      // 由同步任务首次创建的 Canvas 课程，把触发者登记为课程教师
+      if (createdCourse && job.createdBy) {
+        try { dbModule.addCourseMember(course.id, job.createdBy, "teacher"); } catch (_) { /* ignore */ }
+      }
     }
 
     if (Date.now() > deadline) {
@@ -310,71 +311,6 @@ function normalizeCollection(raw, courseId) {
   }));
 }
 
-function mockCollect(courseId) {
-  const now = new Date();
-  const p = (n) => String(n).padStart(2, "0");
-  const today = `${now.getFullYear()}.${p(now.getMonth() + 1)}.${p(now.getDate())}`;
-  const mock = {
-    math1007: [
-      { name: "第1章-函数-1.pdf", type: "课件", date: "2026.09.01", fileSize: 573000, url: "https://mock/cap/math1007/1.pdf" },
-      { name: "第2章-极限与连续-1.pdf", type: "课件", date: "2026.09.08", fileSize: 1134000, url: "https://mock/cap/math1007/2.pdf" },
-      { name: "第3章-导数与微分-习题课.pdf", type: "课件", date: today, fileSize: 1376000, url: "https://mock/cap/math1007/3.pdf" }
-    ],
-    default: [
-      { name: `课程同步资料 #${courseId}`, type: "课件", date: today, fileSize: 1024000, url: `https://mock/cap/${courseId}/1.pdf` }
-    ]
-  };
-  const list = mock[String(courseId).toLowerCase()] || mock.default;
-  return list.map((it, i) => ({
-    name: it.name,
-    type: it.type,
-    source: "Canvas",
-    version: `V1.${i}`,
-    date: it.date,
-    fileSize: it.fileSize,
-    text: "",
-    url: it.url,
-  }));
-}
-
-async function downloadIncremental(courseId, entries, jobId) {
-  const fsP = require("node:fs/promises");
-  const uploadRoot = process.env.UPLOAD_DIR ? path.resolve(process.env.UPLOAD_DIR) : path.join(__dirname, "uploads");
-  const dir = path.join(uploadRoot, String(courseId));
-  await fsP.mkdir(dir, { recursive: true });
-
-  let count = 0;
-  for (const entry of entries) {
-    if (!entry.url) continue;
-    // 演示数据里的假地址不发起真实网络请求
-    if (String(entry.url).startsWith("https://mock/")) continue;
-    const filename = (entry.fileName || entry.name || "file").replace(/[\\/:*?"<>|]/g, "_");
-    const localPath = path.join(dir, filename);
-    try {
-      const stat = await fsP.stat(localPath);
-      if (stat.size > 0) continue; // 已经下载过，跳过
-    } catch (_) {
-      /* 文件不存在则下载 */
-    }
-    try {
-      const resp = await fetch(entry.url, { headers: canvas.getAuthHeaders() });
-      if (resp.ok) {
-        const buf = Buffer.from(await resp.arrayBuffer());
-        await fsP.writeFile(localPath, buf);
-        entry.filePath = path.relative(__dirname, localPath);
-        entry.fileHash = crypto.createHash("sha256").update(buf).digest("hex");
-        entry.fileSize = buf.length;
-        count++;
-      } else {
-        appendSyncJobLog(jobId, "warn", "文件下载失败（HTTP " + resp.status + "）：" + filename);
-      }
-    } catch (e) {
-      appendSyncJobLog(jobId, "warn", "文件下载失败：" + filename + "，" + (e.message || e));
-    }
-  }
-  return count;
-}
-
 function findExistingMaterial(course, name, source) {
   return (course.materials || []).find((m) => m.name === name && (m.source === source || m.source === "Canvas"));
 }
@@ -412,5 +348,4 @@ module.exports = {
   enqueueSyncJob,
   executeSyncJob,
   normalizeCollection,
-  mockCollect,
 };

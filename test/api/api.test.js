@@ -7,12 +7,12 @@
 
 const { describe, it, before, after } = require("node:test");
 const assert = require("node:assert/strict");
-const { getBase, startServer, stopServer, login, auth } = require("./helpers");
+const { getBase, startServer, stopServer, seedFixtures, login, auth } = require("./helpers");
 
 let adminToken = null;
 let studentToken = null;
 
-before(async () => { await startServer(); });
+before(async () => { await startServer(); seedFixtures(); });
 after(async () => { await stopServer(); });
 
 describe("健康检查", () => {

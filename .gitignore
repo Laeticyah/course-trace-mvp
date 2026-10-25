@@ -8,3 +8,5 @@ course-trace.sqlite-wal
 # 敏感配置 — 绝不提交 Canvas Token
 .env
 *.local
+
+backups/

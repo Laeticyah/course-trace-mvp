@@ -1,23 +1,17 @@
 // ================================================================
 // 课脉 · 前端逻辑
 //
-// 数据源策略（统一前后端数据源）：
-//   - 正式运行时：优先使用后端 API（/api/dashboard 等）
-//   - API 不可用时：在开发模式（DEV_MODE）下可使用内置 MockData
-//   - 生产模式：API 失败时显示明确的错误提示 + 重试按钮，不再静默回退
+// 数据源：全部来自后端 API（真实 Canvas 同步数据 + 本地上传），不再提供演示数据回退。
 // ================================================================
 
-// 运行时环境判断：仅当开发模式下允许使用 mock 数据
-const DEV_MODE = location.hostname === "localhost" || location.hostname === "127.0.0.1";
 let API_READY = false;
 
-// 数据容器（优先来自 API，回退时来自 MockData）
 let courses = [];
 let alerts = [];
 
 const $ = s => document.querySelector(s);
 const $$ = s => document.querySelectorAll(s);
-let selectedCourse = "eng101";
+let selectedCourse = "";
 let searchTerm = "";
 let activeFilter = "all";
 let authToken = localStorage.getItem("courseTraceToken") || "";
@@ -42,6 +36,22 @@ function refreshRoleUI(){
   if (globalThis.Ux && typeof globalThis.Ux.applyRoleVisibility === "function") {
     globalThis.Ux.applyRoleVisibility();
   }
+}
+
+/* 侧边栏账号信息：来自当前登录用户 */
+function updateProfileUI(){
+  const nameEl = document.getElementById("profile-name");
+  const roleEl = document.getElementById("profile-role");
+  const avatar = document.querySelector(".profile .avatar");
+  const roleLabels = { student: "学生", teacher: "教师", admin: "管理员" };
+  if(!currentUser){
+    if(nameEl) nameEl.textContent = "未登录";
+    if(roleEl) roleEl.textContent = "请先登录";
+    return;
+  }
+  if(nameEl) nameEl.textContent = currentUser.displayName;
+  if(roleEl) roleEl.textContent = roleLabels[currentUser.role] || currentUser.role;
+  if(avatar) avatar.textContent = currentUser.displayName.slice(0, 1);
 }
 
 /* 鉴权下载：<a> 无法携带 Bearer Token，改为 fetch + Blob */
@@ -115,11 +125,19 @@ function renderAlerts(){
   $("#alert-count").textContent = alerts.length;
 }
 function renderCourseList(){
-  $("#course-list").innerHTML = courses.map(c => `<div class="course-list-item ${selectedCourse===c.id?"selected":""}" data-select-course="${c.id}">${courseDot(c.color)}<div><strong>${c.name}</strong><small>${c.count} 份资料 · ${c.official} 份官方</small></div></div>`).join("");
+  $("#course-list").innerHTML = courses.map(c => `<div class="course-list-item ${selectedCourse===c.id?"selected":""}" data-select-course="${c.id}">${courseDot(c.color)}<div><strong>${esc(c.name)}</strong><small>${c.count} 份资料 · ${c.official} 份官方</small></div></div>`).join("") || `<div class="empty-state">暂无课程，请先同步 Canvas</div>`;
+  renderSidebarCourses();
   var courseCountEl = document.getElementById("course-count");
   if (courseCountEl) courseCountEl.textContent = courses.length + " 门";
   syncSidebarStats();
   renderCourseDetail();
+}
+
+/* 侧边栏课程快捷入口：来自真实课程列表，而不是静态演示数据 */
+function renderSidebarCourses(){
+  var container = document.getElementById("sidebar-courses");
+  if (!container) return;
+  container.innerHTML = courses.map(c => `<button class="course-shortcut ${selectedCourse===c.id?"selected":""}" data-course="${esc(c.id)}"><span class="course-dot ${esc(c.color || "blue")}"></span><span>${esc(c.name)}</span><small>${c.count}</small></button>`).join("") || `<button class="course-shortcut" disabled>暂无课程</button>`;
 }
 
 /* 从真实数据刷新侧边栏统计（课程数、资料总数、提醒数、归档数） */
@@ -145,8 +163,12 @@ function syncSidebarStats(){
   });
 }
 function renderCourseDetail(){
+  if(!selectedCourse && courses[0]) selectedCourse = courses[0].id;
   const c = courses.find(x => x.id === selectedCourse) || courses[0];
-  if(!c) return;
+  if(!c){
+    $("#course-detail").innerHTML = '<div class="empty-state">暂无课程资料，请先同步 Canvas 课程</div>';
+    return;
+  }
   $("#course-detail").innerHTML = `<div class="detail-head"><div><span class="course-code">${c.code}</span><h2>${c.name}</h2><p>${c.desc} · 2026 秋季学期</p></div><div class="detail-metrics"><div class="metric"><strong>${c.count}</strong><small>资料总数</small></div><div class="metric"><strong>${c.official}</strong><small>官方资料</small></div></div></div>
     <div class="material-group"><div class="group-head"><h3>最新权威资料</h3><span>默认按可信度排序</span></div>${(c.materials||[]).map(m => `<div class="material-row"><span class="material-icon">${esc(m.icon || "▤")}</span><div><strong>${esc(m.name)}</strong><small>${esc(m.type)} · ${esc(m.source)} · ${esc(m.version)} · ${esc(m.date)}${m.authorityScore ? ` · 权威度 ${Math.round(m.authorityScore*100)}%` : ""}${m.reviewStatus === "approved" ? " · 已审核" : ""}</small></div><div class="material-row-actions"><span class="tag status-tag ${m.status}">${esc(m.statusText)}</span>${m.filePath ? `<button class="download-link" data-download-material="${esc(m.id)}" data-download-name="${esc(m.fileName || m.name || "material")}" title="下载已采集到本地的资料文件">下载</button>` : `<span class="download-placeholder">未采集到文件</span>`}${currentUser && ["teacher","admin"].includes(currentUser.role) ? `<button class="review-button" data-review-material="${m.id}" data-review-status="${m.reviewStatus === "approved" ? "pending" : "approved"}">${m.reviewStatus === "approved" ? "撤销审核" : "确认权威"}</button>` : ""}</div></div>`).join("")}</div>
     <div class="material-group"><div class="group-head"><h3>版本时间线</h3><span>可回溯 ${esc((versionChain(c).primary || {}).name || "资料")}</span></div><div class="timeline">${versionTimeline(c)}</div></div>`;
@@ -163,7 +185,15 @@ function switchView(view){
   window.scrollTo({top:0,scrollBehavior:"smooth"});
 }
 function showToast(text){ $("#toast p").textContent=text; $("#toast").classList.add("show"); setTimeout(()=>$("#toast").classList.remove("show"),2600); }
-function openModal(){ $("#material-modal").classList.add("open"); $("#material-modal").setAttribute("aria-hidden","false"); }
+function openModal(){
+  const select = document.getElementById("material-course");
+  if(select){
+    select.innerHTML = courses.map(c => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join("");
+    if(selectedCourse) select.value = selectedCourse;
+  }
+  $("#material-modal").classList.add("open");
+  $("#material-modal").setAttribute("aria-hidden","false");
+}
 function closeModal(){ $("#material-modal").classList.remove("open"); $("#material-modal").setAttribute("aria-hidden","true"); }
 function openLogin(){ const modal=$("#login-modal"); if(!modal) return; modal.classList.add("open"); modal.setAttribute("aria-hidden","false"); }
 function closeLogin(){ const modal=$("#login-modal"); if(!modal) return; modal.classList.remove("open"); modal.setAttribute("aria-hidden","true"); }
@@ -291,18 +321,11 @@ async function loadFromApi(){
     hideApiError();
   }catch(error){
     console.warn("[load] API unavailable:", error.message);
-    if (DEV_MODE && (globalThis.MockData)) {
-      // 开发模式允许 mock 回退
-      courses = MockData.getCourses();
-      alerts = MockData.getAlerts();
-      showToast("⚠️ 开发模式：正在使用演示数据");
-    } else {
-      // 生产模式：显示明确的错误提示
-      showApiError(error.message);
-      markReady();
-      return;
-    }
+    showApiError(error.message);
+    markReady();
+    return;
   }
+  if(courses.length && !courses.some(c => c.id === selectedCourse)) selectedCourse = courses[0].id;
   renderCourseCards(); renderAlerts(); renderCourseList(); renderArchive();
   markReady();
 }
@@ -329,6 +352,7 @@ async function loadCurrentUser(){
       $("#account-button").title = `${currentUser.displayName} · ${currentUser.role}`;
       const loginHint = document.getElementById("login-hint");
       if (loginHint) loginHint.hidden = true;
+      updateProfileUI();
       refreshRoleUI();
     } else {
       authToken = "";
@@ -341,7 +365,16 @@ async function loadCurrentUser(){
 renderCourseCards(); renderAlerts(); renderCourseList(); renderArchive();
 $$(".nav-item").forEach(b => b.addEventListener("click", () => switchView(b.dataset.view)));
 $$("[data-view-target]").forEach(b => b.addEventListener("click", () => switchView(b.dataset.viewTarget)));
-$$(".course-shortcut").forEach(b => b.addEventListener("click", () => { selectedCourse=b.dataset.course; renderCourseList(); switchView("courses"); }));
+var sidebarCoursesEl = document.getElementById("sidebar-courses");
+if(sidebarCoursesEl){
+  sidebarCoursesEl.addEventListener("click", e => {
+    const btn = e.target.closest("[data-course]");
+    if(!btn) return;
+    selectedCourse = btn.dataset.course;
+    renderCourseList();
+    switchView("courses");
+  });
+}
 $("#course-list").addEventListener("click", e => { const item=e.target.closest("[data-select-course]"); if(item){selectedCourse=item.dataset.course; renderCourseList();} });
 $("#course-detail").addEventListener("click", async e => {
   const downloadButton = e.target.closest("[data-download-material]");
@@ -439,6 +472,7 @@ $("#login-form").addEventListener("submit", async e=>{
     currentUser=result.user;
     $("#account-button").textContent=result.user.displayName.slice(0,1);
     $("#account-button").title=`${result.user.displayName} · ${result.user.role}`;
+    updateProfileUI();
     refreshRoleUI();
     closeLogin();
     showToast(`已登录：${result.user.displayName}`);
@@ -458,12 +492,6 @@ $("#login-modal").addEventListener("click",e=>{if(e.target.id==="login-modal")cl
 
 async function boot(){
   if(!authToken){
-    // 未登录：锁定主界面，只显示登录层（若有内置演示数据先渲染）
-    if (globalThis.MockData) {
-      courses = MockData.getCourses();
-      alerts = MockData.getAlerts();
-      renderCourseCards(); renderAlerts(); renderCourseList(); renderArchive();
-    }
     markReady();
     openLogin();
     return;

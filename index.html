@@ -30,13 +30,10 @@
         </nav>
         <div class="sidebar-section">
           <div class="section-label">我的课程 <button id="add-course" title="添加课程">＋</button></div>
-          <button class="course-shortcut selected" data-course="eng101"><span class="course-dot blue"></span><span>工程学导论</span><small>18</small></button>
-          <button class="course-shortcut" data-course="math101"><span class="course-dot orange"></span><span>高等数学 I</span><small>24</small></button>
-          <button class="course-shortcut" data-course="ai101"><span class="course-dot green"></span><span>人工智能导论</span><small>31</small></button>
+          <div id="sidebar-courses"></div>
         </div>
         <div class="sidebar-footer">
-          <div class="profile"><div class="avatar">林</div><div><strong>林同学</strong><small>本科生 · 2026级</small></div><span>•••</span></div>
-          <div class="storage"><div><span>资料库容量</span><strong>68%</strong></div><div class="progress"><span></span></div><small>已治理 73 / 108 份资料</small></div>
+          <div class="profile"><div class="avatar">?</div><div><strong id="profile-name">未登录</strong><small id="profile-role">请先登录</small></div><span>•••</span></div>
         </div>
       </aside>
 
@@ -198,15 +195,15 @@
           </div>
         </section>
 
-        <footer class="app-footer"><span>课脉 · 课程资料版本治理与可信检索 MVP</span><span>数据仅用于演示 · 最后同步于 2026.10.15</span></footer>
+        <footer class="app-footer"><span>课脉 · 课程资料版本治理与可信检索</span><span>数据来源：Canvas 同步 / 本地上传</span></footer>
       </main>
     </div>
 
     <div class="modal-backdrop" id="material-modal" aria-hidden="true">
-      <div class="modal"><button class="modal-close" data-close-modal>×</button><span class="tiny-label">ADD MATERIAL</span><h2>登记一份新资料</h2><p>上传文件后，课脉会计算 SHA-256 内容指纹并检查重复版本。</p><form id="material-form"><label>资料名称<input name="name" required placeholder="例如：第三章 需求分析课件" /></label><div class="form-row"><label>所属课程<select name="course"><option value="eng101">工程学导论</option><option value="math101">高等数学 I</option><option value="ai101">人工智能导论</option></select></label><label>资料类型<select name="type"><option>课件</option><option>作业要求</option><option>复习笔记</option><option>答案整理</option></select></label></div><label>资料来源<select name="source"><option value="Canvas">Canvas（官方）</option><option value="知途好课">知途好课（官方）</option><option value="班级群">班级群（学生整理）</option><option value="网盘">网盘（学生整理）</option></select></label><label>资料文件<input name="file" type="file" accept=".pdf,.ppt,.pptx,.doc,.docx,.txt" /></label><button class="primary-button full-width" type="submit">加入资料库 <span>→</span></button></form></div>
+      <div class="modal"><button class="modal-close" data-close-modal>×</button><span class="tiny-label">ADD MATERIAL</span><h2>登记一份新资料</h2><p>上传文件后，课脉会计算 SHA-256 内容指纹并检查重复版本。</p><form id="material-form"><label>资料名称<input name="name" required placeholder="例如：第三章 需求分析课件" /></label><div class="form-row"><label>所属课程<select name="course" id="material-course" required></select></label><label>资料类型<select name="type"><option>课件</option><option>作业要求</option><option>复习笔记</option><option>答案整理</option></select></label></div><label>资料来源<select name="source"><option value="Canvas">Canvas（官方）</option><option value="知途好课">知途好课（官方）</option><option value="班级群">班级群（学生整理）</option><option value="网盘">网盘（学生整理）</option></select></label><label>资料文件<input name="file" type="file" accept=".pdf,.ppt,.pptx,.doc,.docx,.txt" /></label><button class="primary-button full-width" type="submit">加入资料库 <span>→</span></button></form></div>
     </div>
     <div class="modal-backdrop" id="login-modal" aria-hidden="true">
-      <div class="modal"><button class="modal-close" data-close-login>×</button><span class="tiny-label">ACCOUNT ACCESS</span><h2>登录课脉</h2><p>教师或管理员账号才能上传资料和管理版本。</p><form id="login-form"><label>用户名<input name="username" required value="teacher" /></label><label>密码<input name="password" type="password" required value="teacher123" /></label><button class="primary-button full-width" type="submit">登录 <span>→</span></button></form><div class="demo-accounts">演示账号：student / student123 · teacher / teacher123 · admin / admin123</div></div>
+      <div class="modal"><button class="modal-close" data-close-login>×</button><span class="tiny-label">ACCOUNT ACCESS</span><h2>登录课脉</h2><p>教师或管理员账号才能上传资料和管理版本。</p><form id="login-form"><label>用户名<input name="username" required value="teacher" /></label><label>密码<input name="password" type="password" required value="teacher123" /></label><button class="primary-button full-width" type="submit">登录 <span>→</span></button></form><div class="demo-accounts">内置账号：student / student123 · teacher / teacher123 · admin / admin123</div></div>
     </div>
     <div class="modal-backdrop" id="sync-modal" aria-hidden="true">
       <div class="modal modal-lg">
@@ -227,11 +224,10 @@
     <div id="login-hint" class="login-hint" hidden>
       <div class="login-hint-card">
         <span class="login-hint-icon">⌂</span>
-        <p>你还未登录，只能浏览演示数据。</p>
+        <p>请登录后查看课程资料。</p>
         <button class="primary-button" data-open-login>去登录</button>
       </div>
     </div>
-    <script src="mock-data.js"></script>
     <script src="app.js"></script>
     <script src="enhancements.js"></script>
     <script src="ux-polish.js"></script>

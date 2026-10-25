@@ -33,9 +33,9 @@ async function startServer() {
       PORT: String(port),
       DB_FILE: path.join(tempDir, "test.sqlite"),
       UPLOAD_DIR: path.join(tempDir, "uploads"),
-      // 测试不访问真实 Canvas，固定走 mock 采集
-      CANVAS_MODE: "mock",
-      CANVAS_MOCK_MODE: "true",
+      // 测试不访问真实 Canvas：置空 Token，让同步任务明确失败（成功链路用真实环境手工验证）
+      CANVAS_TOKEN: "",
+      CANVAS_BASE_URL: "http://127.0.0.1:1",
       NODE_ENV: "test"
     }
   });
@@ -68,6 +68,56 @@ async function stopServer() {
   base = null;
 }
 
+/**
+ * 测试用最小数据：真实数据由 Canvas 同步/上传产生，这里只为接口测试准备固定的课程与成员。
+ * 在服务启动后写入同一个临时 SQLite（服务端每次请求都实时读库）。
+ */
+function seedFixtures() {
+  const { DatabaseSync } = require("node:sqlite");
+  const db = new DatabaseSync(path.join(tempDir, "test.sqlite"), { timeout: 5000 });
+  const now = new Date().toISOString();
+  const insertCourse = db.prepare("INSERT OR REPLACE INTO courses (id, code, name, description, color, progress, official_count, updates) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+  const insertMaterial = db.prepare(`INSERT OR REPLACE INTO materials (
+    id, course_id, name, type, source, version, date, status, status_text, icon,
+    version_chain_id, is_authoritative, review_status
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+  const insertMember = db.prepare("INSERT OR REPLACE INTO course_members (course_id, user_id, member_role, joined_at) VALUES (?, ?, ?, ?)");
+  const courses = [
+    ["eng101", "ENG 101", "工程学导论", "Engineering Fundamentals", "blue", 72, 1, "刚刚更新"],
+    ["math101", "MATH 101", "高等数学 I", "Advanced Mathematics", "orange", 54, 1, "刚刚更新"],
+    ["ai101", "AI 101", "人工智能导论", "Introduction to AI", "green", 81, 1, "刚刚更新"]
+  ];
+  const materials = [
+    ["fixture-m1", "eng101", "第 3 章｜需求分析与问题定位", "课件", "Canvas", "V3.0", "2026.10.15", "official", "最新权威版", "▤", "fixture-chain-1"],
+    ["fixture-m2", "eng101", "项目建议书评分标准", "作业要求", "Canvas", "V2.1", "2026.10.12", "official", "官方资料", "▣", "fixture-chain-2"],
+    ["fixture-m3", "eng101", "答辩重点与个人分工整理", "复习笔记", "班级群", "V1.0", "2026.10.08", "student", "学生整理", "✎", "fixture-chain-3"],
+    ["fixture-m4", "math101", "第 5 章｜定积分应用", "课件", "知途好课", "V2.0", "2026.10.13", "official", "官方资料", "▤", "fixture-chain-4"],
+    ["fixture-m5", "math101", "期中复习范围说明", "作业要求", "Canvas", "V1.0", "2026.10.01", "official", "官方资料", "▣", "fixture-chain-5"],
+    ["fixture-m6", "ai101", "第 2 章｜机器学习概览", "课件", "Canvas", "V4.0", "2026.10.10", "official", "官方资料", "▤", "fixture-chain-6"]
+  ];
+  let attempt = 0;
+  for (;;) {
+    try {
+      db.exec("BEGIN IMMEDIATE");
+      for (const course of courses) insertCourse.run(...course);
+      for (const m of materials) {
+        insertMaterial.run(m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10], 1, "pending");
+      }
+      insertMember.run("eng101", "teacher-demo", "teacher", now);
+      insertMember.run("math101", "teacher-demo", "teacher", now);
+      insertMember.run("ai101", "teacher-demo", "teacher", now);
+      insertMember.run("eng101", "student-demo", "student", now);
+      db.exec("COMMIT");
+      break;
+    } catch (error) {
+      try { db.exec("ROLLBACK"); } catch (_) { /* ignore */ }
+      if (++attempt > 20) { db.close(); throw error; }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 150);
+    }
+  }
+  db.close();
+}
+
 async function login(username, password) {
   const res = await fetch(getBase() + "/api/auth/login", {
     method: "POST",
@@ -98,4 +148,4 @@ async function uploadMaterial(token, { name, course, type = "课件", source = "
   return { status: res.status, data };
 }
 
-module.exports = { ROOT, getBase, startServer, stopServer, login, auth, uploadMaterial };
+module.exports = { ROOT, getBase, startServer, stopServer, seedFixtures, login, auth, uploadMaterial };

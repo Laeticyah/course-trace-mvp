@@ -8,7 +8,7 @@
 
 const { describe, it, before, after } = require("node:test");
 const assert = require("node:assert/strict");
-const { getBase, startServer, stopServer, login, auth, uploadMaterial } = require("./helpers");
+const { getBase, startServer, stopServer, seedFixtures, login, auth, uploadMaterial } = require("./helpers");
 
 const CONTENT_MARKER = "SECURITY-CHECK-CONTENT";
 const UPLOAD_NAME = "阶段1权限验证资料";
@@ -20,6 +20,7 @@ let uploaded = null;
 
 before(async () => {
   await startServer();
+  seedFixtures();
   adminToken = await login("admin", "admin123");
   teacherToken = await login("teacher", "teacher123");
   studentToken = await login("student", "student123");

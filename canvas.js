@@ -45,21 +45,9 @@ function cfg(name, fallback) {
 const BASE_URL = cfg("CANVAS_BASE_URL", "https://oc.sjtu.edu.cn").replace(/\/+$/, "");
 const TOKEN = cfg("CANVAS_TOKEN", "").trim();
 
-// 兼容两种 key：优先 CANVAS_MODE，其次旧版 CANVAS_MOCK_MODE
-const legacyMode = cfg("CANVAS_MOCK_MODE", "").toLowerCase();
-const MODE = (cfg("CANVAS_MODE", "").toLowerCase() === "real" || legacyMode === "false") ? "real" : "mock";
-
-/** 判断是否具备走真实 API 的条件 */
+/** 判断是否具备走真实 API 的条件（本系统只同步真实 Canvas 数据，不再提供 mock 模式） */
 function hasToken() {
   return Boolean(TOKEN) && !/^(paste_|xxx|your_|yourtoken)/i.test(TOKEN);
-}
-
-/** 当前生效模式：real / mock */
-function effectiveMode() {
-  if (MODE === "real") {
-    return hasToken() ? "real" : "mock";
-  }
-  return "mock";
 }
 
 /** 下载 Canvas 文件时需要携带的鉴权头（无有效 token 时为空对象） */
@@ -207,90 +195,36 @@ async function realCollectCourseFiles(courseId) {
 
     return { entries: dedupe(entries), diagnostics };
   } catch (err) {
-    if (String(err.message).includes("TOKEN_UNAUTHORIZED")) {
-      return { entries: [], diagnostics: ["TOKEN_UNAUTHORIZED"], fallback: "forced_mock" };
-    }
     throw err;
   }
 }
 
-/** 真实/模拟：列出可同步的课程 */
-function gatherCourses(source) {
-  const now = new Date();
-  const p = (n) => String(n).padStart(2, "0");
-  const today = `${now.getFullYear()}.${p(now.getMonth() + 1)}.${p(now.getDate())}`;
-
-  const spec =
-    source === "real"
-      ? [
-          { id: 97558, name: "高等数学I", code: "MATH1007", desc: "Advanced Mathematics I" },
-          { id: 97477, name: "程序设计思想与方法（C++）", code: "CS1501", desc: "Computer Programming C++" },
-          { id: 97620, name: "工程学导论", code: "ENG101", desc: "Introduction to Engineering" }
-        ]
-      : [
-          { id: "eng101", name: "工程学导论", code: "ENG 101", desc: "Engineering Fundamentals", color: "blue", count: 18, progress: 72, materials: [] },
-          { id: "math101", name: "高等数学 I", code: "MATH 101", desc: "Advanced Mathematics", color: "purple", count: 24, progress: 54, materials: [] },
-          { id: "ai101", name: "人工智能导论", code: "AI 101", desc: "Intro to AI", color: "green", count: 31, progress: 81, materials: [] }
-        ];
-
-  return spec.map((c) =>
-    source === "real"
-      ? { id: String(c.id), code: c.code, name: c.name, desc: c.desc, color: "blue", count: 0, progress: 0, materials: [] }
-      : c
-  );
-}
-
-/** Mock 采集：返回每个课程的模拟资料，字段与真实一致 */
-function mockCollectCourseFiles(courseId) {
-  const now = new Date();
-  const p = (n) => String(n).padStart(2, "0");
-  const today = `${now.getFullYear()}.${p(now.getMonth() + 1)}.${p(now.getDate())}`;
-
-  const mockByCourse = {
-    math1007: [
-      { name: "第1章-函数-1.pdf", type: "课件", source: "Canvas", version: "V1.0", date: "2026.09.01", status: "official", fileSize: 573000, canvasId: "mock-math-1", courseId, icon: "▤" },
-      { name: "第2章-极限与连续-1.pdf", type: "课件", source: "Canvas", version: "V1.0", date: "2026.09.08", status: "official", fileSize: 1134000, canvasId: "mock-math-2", courseId, icon: "▤" },
-      { name: "第三章-导数与微分-1.pdf", type: "课件", source: "Canvas", version: "V1.0", date: today, status: "official", fileSize: 1376000, canvasId: "mock-math-3", courseId, icon: "▤" }
-    ],
-    default: [
-      { name: `课程同步资料 #${courseId}`, type: "课件", source: "Canvas", version: "V1.0", date: today, status: "official", fileSize: 1500000, canvasId: `mock-${courseId}-1`, courseId, icon: "▤" }
-    ]
-  };
-
-  const found = mockByCourse[courseId] || mockByCourse.default;
-  return Array.isArray(found) ? found : [];
+/** 列出账号可访问的真实 Canvas 课程 */
+async function listCourses() {
+  if (!hasToken()) throw new Error("NO_VALID_TOKEN");
+  const raw = await canvasFetch("/api/v1/courses");
+  const courses = raw
+    .filter((course) => course && (course.name || course.course_code))
+    .map((course) => ({
+      id: String(course.id),
+      code: course.course_code || String(course.id),
+      name: course.name || String(course.id),
+      desc: course.course_code || "",
+    }));
+  return { mode: "real", courses };
 }
 
 /**
- * 对外统一入口：采集一门课程的资料流
- * @param {string} courseId 课程 id（可为内部 id 或 Canvas 数字 id）
- * @returns {Promise<{mode, items, diagnostics, fallback}>}
+ * 对外统一入口：采集一门课程的资料流（只走真实 Canvas API）
  */
 async function collectCourseFiles(courseId) {
-  const mode = effectiveMode();
-  if (mode === "real") {
-    const result = await realCollectCourseFiles(courseId);
-    return {
-      mode: "real",
-      items: result.entries,
-      diagnostics: result.diagnostics,
-      fallback: result.fallback || false,
-    };
-  }
+  if (!hasToken()) throw new Error("NO_VALID_TOKEN");
+  const result = await realCollectCourseFiles(courseId);
   return {
-    mode: "mock",
-    items: mockCollectCourseFiles(courseId),
-    diagnostics: ["mock_mode: 未配置有效 Canvas Token，使用演示数据"],
-    fallback: false,
-  };
-}
-
-/** 列出可同步的课程 */
-function listCourses(modeHint) {
-  const mode = modeHint || effectiveMode();
-  return {
-    mode,
-    courses: gatherCourses(mode),
+    mode: "real",
+    items: result.entries,
+    diagnostics: result.diagnostics,
+    fallback: result.fallback || false,
   };
 }
 
@@ -337,7 +271,6 @@ async function downloadCourseFiles(courseId, destDir) {
   const path = require("node:path");
 
   if (!hasToken()) throw new Error("NO_VALID_TOKEN");
-  if (MODE === "mock") return [];
   await fs.mkdir(destDir, { recursive: true });
 
   const files = await canvasFetch(`/api/v1/courses/${courseId}/files`).catch(() => []);
@@ -372,13 +305,10 @@ module.exports = {
   downloadCourseFiles,
   collectCourseFiles,
   listCourses,
-  gatherCourses,
   getCourseInfo,
-  mockCollectCourseFiles,
   realCollectCourseFiles,
   hasToken,
   getAuthHeaders,
   cfg,
   BASE_URL,
-  MODE,
 };

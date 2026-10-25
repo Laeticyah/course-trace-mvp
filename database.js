@@ -6,7 +6,6 @@ const crypto = require("node:crypto");
 const databaseFile = process.env.DB_FILE
   ? path.resolve(process.env.DB_FILE)
   : path.join(__dirname, "course-trace.sqlite");
-const legacyDataFile = path.join(__dirname, "data.json");
 const db = new DatabaseSync(databaseFile, { timeout: 5000 });
 
 db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
@@ -436,10 +435,6 @@ function writeData(data) {
   syncFTSIndex();
 }
 
-if (db.prepare("SELECT COUNT(*) AS count FROM courses").get().count === 0 && fs.existsSync(legacyDataFile)) {
-  writeData(JSON.parse(fs.readFileSync(legacyDataFile, "utf8")));
-}
-
 function hashPassword(password, salt = crypto.randomBytes(16).toString("hex")) {
   const hash = crypto.scryptSync(password, salt, 64).toString("hex");
   return `${salt}:${hash}`;
@@ -459,25 +454,9 @@ function seedUsers() {
     VALUES (?, ?, ?, ?, ?, ?)
   `);
   const now = new Date().toISOString();
-  insert.run("student-demo", "student", "林同学", hashPassword("student123"), "student", now);
-  insert.run("teacher-demo", "teacher", "王老师", hashPassword("teacher123"), "teacher", now);
-  insert.run("admin-demo", "admin", "资料管理员", hashPassword("admin123"), "admin", now);
-}
-
-function seedCourseMembers() {
-  const courses = db.prepare("SELECT id FROM courses").all();
-  const teacher = db.prepare("SELECT id FROM users WHERE username = 'teacher'").get();
-  const student = db.prepare("SELECT id FROM users WHERE username = 'student'").get();
-  if (!teacher || !student) return;
-  // 幂等补齐演示账号的课程成员关系；只覆盖演示课程，避免把 Canvas 同步进来的课程也“送”给教师
-  const DEMO_COURSE_IDS = new Set(["eng101", "math101", "ai101"]);
-  const insert = db.prepare("INSERT OR IGNORE INTO course_members (course_id, user_id, member_role, joined_at) VALUES (?, ?, ?, ?)");
-  const now = new Date().toISOString();
-  for (const course of courses) {
-    if (!DEMO_COURSE_IDS.has(course.id)) continue;
-    insert.run(course.id, teacher.id, "teacher", now);
-    if (course.id === "eng101") insert.run(course.id, student.id, "student", now);
-  }
+  insert.run("student-demo", "student", "学生账号", hashPassword("student123"), "student", now);
+  insert.run("teacher-demo", "teacher", "教师账号", hashPassword("teacher123"), "teacher", now);
+  insert.run("admin-demo", "admin", "管理员", hashPassword("admin123"), "admin", now);
 }
 
 function getMembership(courseId, userId) {
@@ -762,7 +741,6 @@ function canAccessCourse(user, courseId) {
 initFTS();
 
 seedUsers();
-seedCourseMembers();
 
 // ================================================================
 // 同步任务（sync jobs）

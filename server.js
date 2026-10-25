@@ -33,36 +33,10 @@ const upload = multer({
   limits: { fileSize: 25 * 1024 * 1024 }
 });
 
-const seed = {
-  courses: [
-    { id:"eng101", code:"ENG 101", name:"工程学导论", desc:"Engineering Fundamentals", color:"blue", count:18, progress:72, official:4, updates:"今日更新", materials:[
-      {name:"第 3 章｜需求分析与问题定位", type:"课件", source:"Canvas", version:"V3.0", date:"2026.10.15", status:"official", statusText:"最新权威版", icon:"▤"},
-      {name:"项目建议书评分标准", type:"作业要求", source:"Canvas", version:"V2.1", date:"2026.10.12", status:"official", statusText:"官方资料", icon:"▣"},
-      {name:"答辩重点与个人分工整理", type:"复习笔记", source:"班级群", version:"V1.0", date:"2026.10.08", status:"student", statusText:"学生整理", icon:"✎"}
-    ]},
-    { id:"math101", code:"MATH 101", name:"高等数学 I", desc:"Advanced Mathematics", color:"orange", count:24, progress:54, official:7, updates:"2 天前", materials:[
-      {name:"第 5 章｜定积分应用", type:"课件", source:"知途好课", version:"V2.0", date:"2026.10.13", status:"official", statusText:"最新权威版", icon:"▤"},
-      {name:"期中复习范围说明", type:"作业要求", source:"Canvas", version:"V1.0", date:"2026.10.01", status:"official", statusText:"官方资料", icon:"▣"},
-      {name:"极限与连续性错题整理", type:"复习笔记", source:"网盘", version:"V1.2", date:"2026.09.28", status:"student", statusText:"学生整理", icon:"✎"}
-    ]},
-    { id:"ai101", code:"AI 101", name:"人工智能导论", desc:"Introduction to AI", color:"green", count:31, progress:81, official:9, updates:"5 天前", materials:[
-      {name:"第 2 章｜机器学习概览", type:"课件", source:"Canvas", version:"V4.0", date:"2026.10.10", status:"official", statusText:"最新权威版", icon:"▤"},
-      {name:"第一次编程作业要求", type:"作业要求", source:"Canvas", version:"V1.1", date:"2026.10.05", status:"official", statusText:"官方资料", icon:"▣"},
-      {name:"Python 环境配置避坑指南", type:"复习笔记", source:"班级群", version:"V1.0", date:"2026.09.22", status:"student", statusText:"学生整理", icon:"✎"}
-    ]}
-  ],
-  alerts: [
-    {title:"工程学导论 · 第 3 章课件已更新", desc:"检测到内容变更：新增“需求优先级”小节。V3.0 已成为当前权威版本。", time:"今天 09:42", course:"工程学导论", unread:true},
-    {title:"工程学导论 · 项目建议书评分标准", desc:"老师更新了提交格式说明，旧版本已自动归档。", time:"昨天 16:20", course:"工程学导论", unread:true},
-    {title:"高等数学 I · 期中复习范围", desc:"已确认当前版本来自 Canvas，暂无内容变更。", time:"10 月 13 日", course:"高等数学 I", unread:true},
-    {title:"人工智能导论 · 机器学习概览", desc:"版本 V4.0 已同步，新增 2 个示例。", time:"10 月 10 日", course:"人工智能导论", unread:false}
-  ]
-};
-
 /* 静态资源白名单：只对外暴露前端页面与脚本，源码 / 数据库 / 上传文件不再走静态托管 */
 const PUBLIC_FILES = new Set([
   "/", "/index.html", "/styles.css", "/app.js",
-  "/mock-data.js", "/enhancements.js", "/ux-polish.js"
+  "/enhancements.js", "/ux-polish.js"
 ]);
 
 function sanitizeFileName(name){
@@ -627,13 +601,65 @@ app.post('/api/courses/:courseId/sync', requireAuth, requireRole('teacher', 'adm
   try {
     const courseId = String(req.params.courseId);
     const data = readData();
-    if (!data.courses.some(course => course.id === courseId)) {
-      return res.status(404).json({ error: 'COURSE_NOT_FOUND', message: '课程不存在' });
+    let exists = data.courses.some(course => course.id === courseId);
+    // 管理员可以直接用 Canvas 数字课程 id 触发同步：先把真实课程记录建出来，再创建同步任务
+    if (!exists) {
+      if (req.user.role !== 'admin' || !/^\d+$/.test(courseId)) {
+        return res.status(404).json({ error: 'COURSE_NOT_FOUND', message: '课程不存在（可从 Canvas 导入课程后同步）' });
+      }
+      let info = null;
+      try { info = await canvas.getCourseInfo(courseId); } catch (_) { info = null; }
+      data.courses.push({
+        id: courseId,
+        code: (info && info.course && info.course.code) || courseId,
+        name: (info && info.course && info.course.name) || ('Canvas 课程 ' + courseId),
+        desc: (info && info.course && info.course.desc) || '',
+        color: 'blue', count: 0, official: 0, progress: 0, updates: '等待同步', materials: []
+      });
+      writeData(data);
+      exists = true;
+    } else if (!ensureCourseTeacher(req.user, courseId, res)) {
+      return;
     }
-    if (!ensureCourseTeacher(req.user, courseId, res)) return;
     const job = createSyncJob({ courseId, scope: 'course', createdBy: req.user.id });
     syncEngine.enqueueSyncJob(job.id);
     res.status(202).json({ job });
+  } catch (err) { next(err); }
+});
+// 管理员：列出 Canvas 上的真实课程
+app.get('/api/canvas/courses', requireAuth, requireRole('admin'), async (_req, res, next) => {
+  try {
+    const listing = await canvas.listCourses();
+    res.json(listing);
+  } catch (err) { next(err); }
+});
+// 管理员：一键导入 Canvas 上尚未入库的真实课程（每个课程创建一个同步任务）
+app.post('/api/canvas/import-courses', requireAuth, requireRole('admin'), async (req, res, next) => {
+  try {
+    const listing = await canvas.listCourses();
+    const data = readData();
+    const existing = new Set(data.courses.map(course => course.id));
+    const newCourses = [];
+    for (const course of listing.courses || []) {
+      const id = String(course.id);
+      if (existing.has(id)) continue;
+      data.courses.push({
+        id,
+        code: course.code || id,
+        name: course.name || ('Canvas 课程 ' + id),
+        desc: course.desc || '',
+        color: 'blue', count: 0, official: 0, progress: 0, updates: '等待同步', materials: []
+      });
+      existing.add(id);
+      newCourses.push(id);
+    }
+    if (newCourses.length) writeData(data);
+    const jobs = newCourses.map((id) => {
+      const job = createSyncJob({ courseId: id, scope: 'course', createdBy: req.user.id });
+      syncEngine.enqueueSyncJob(job.id);
+      return job;
+    });
+    res.status(202).json({ imported: jobs.length, jobs });
   } catch (err) { next(err); }
 });
 app.post('/api/sync-jobs', requireAuth, requireRole('admin'), async (req, res, next) => {
@@ -714,7 +740,7 @@ fs.mkdir(uploadDir, { recursive: true })
           console.log("[auto-sync] 未配置 Canvas token，跳过自动同步");
           return;
         }
-        const listing = canvas.listCourses();
+        const listing = await canvas.listCourses();
         const courses = Array.isArray(listing) ? listing : ((listing && listing.courses) || []);
         console.log(`[auto-sync] 扫描 ${courses.length} 门课的 Canvas 资料`);
         for (const course of courses) {

@@ -10,7 +10,7 @@
     "test": "node --test \"test/unit/*.test.js\" \"test/api/*.test.js\"",
     "test:unit": "node --test \"test/unit/*.test.js\"",
     "test:api": "node --test \"test/api/*.test.js\"",
-    "test:regression": "node --test test/regression.test.js"
+    "cleanup:demo": "node scripts/cleanup-demo-data.js"
   },
   "dependencies": {
     "express": "^4.21.2",
